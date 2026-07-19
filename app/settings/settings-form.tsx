@@ -321,6 +321,89 @@ export function SettingsForm({ initial }: { initial: FormState }) {
           projects can override this in their own settings.
         </p>
       </div>
+      <Field
+        label="Context window (tokens)"
+        id="context_window"
+        description="Fallback context size when LocalForge can't detect what the loaded model actually supports. Match this to the context length you configured in LM Studio / Ollama — being honest here is what keeps small models from silently degrading."
+        value={values.context_window}
+        onChange={(v) => update("context_window", v)}
+        placeholder="8192"
+      />
+      <div className="flex flex-col gap-2">
+        <label
+          htmlFor="project_template"
+          className="text-sm font-medium text-foreground"
+        >
+          Project template
+        </label>
+        <select
+          id="project_template"
+          name="project_template"
+          data-testid="settings-project-template-select"
+          value={values.project_template}
+          onChange={(e) => update("project_template", e.target.value)}
+          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="next-app">Next.js app (default)</option>
+          <option value="vite-react">Vite + React</option>
+          <option value="none">None (agent starts from an empty folder)</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          New projects are scaffolded from this template by the harness itself
+          — dev-server port pre-wired, dependencies installed — so the model
+          never burns turns on project setup.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2">
+        <label
+          htmlFor="spec_generation"
+          className="text-sm font-medium text-foreground"
+        >
+          Spec generation
+        </label>
+        <select
+          id="spec_generation"
+          name="spec_generation"
+          data-testid="settings-spec-generation-select"
+          value={values.spec_generation}
+          onChange={(e) => update("spec_generation", e.target.value)}
+          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="false">Disabled (default)</option>
+          <option value="true">Enabled (non-fatal)</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          After a feature passes, the model writes a Playwright spec and the
+          harness executes it. Results show as a badge on the kanban card but
+          never fail the feature — small-model specs are informative, not
+          authoritative. The model never drives a browser interactively.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2">
+        <label
+          htmlFor="engine"
+          className="text-sm font-medium text-foreground"
+        >
+          Execution engine
+        </label>
+        <select
+          id="engine"
+          name="engine"
+          data-testid="settings-engine-select"
+          value={values.engine}
+          onChange={(e) => update("engine", e.target.value)}
+          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="forge">Forge (step pipeline, default)</option>
+          <option value="pi">Legacy (pi single-session)</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          Forge decomposes each feature into small steps run in fresh,
+          token-budgeted sessions with harness-run verification — built for
+          small local models. The legacy engine runs one long pi session per
+          feature and will be removed.
+        </p>
+      </div>
       <div className="flex flex-col gap-2">
         <label
           htmlFor="playwright_enabled"

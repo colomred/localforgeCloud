@@ -92,9 +92,10 @@ export const DEFAULT_GLOBAL_SETTINGS: Record<GlobalSettingKey, string> = {
   // to each feature; the harness executes the spec and reports the result
   // as a non-fatal badge. The model never drives a browser interactively.
   spec_generation: "false",
-  // Execution engine migration flag: "pi" (legacy agent-runner) or "forge"
-  // (the bespoke small-model engine). Removed once the migration completes.
-  engine: "pi",
+  // Execution engine migration flag: "forge" (the bespoke small-model
+  // engine, default) or "pi" (legacy agent-runner). Removed once the
+  // migration completes.
+  engine: "forge",
 };
 
 export const MAX_CONCURRENT_AGENTS_HARD_CAP = 3;
