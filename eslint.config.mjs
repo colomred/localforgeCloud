@@ -12,6 +12,7 @@ const eslintConfig = [
       "drizzle/**",
       "projects/**",
       "data/**",
+      "templates/**",
       "screenshots/**",
       "test-results/**",
       "playwright-report/**",

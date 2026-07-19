@@ -31,7 +31,7 @@ function substitute(content: string, vars: Record<string, string>): string {
   return out;
 }
 
-function copyTemplateDir(
+export function copyTemplateDir(
   srcDir: string,
   destDir: string,
   vars: Record<string, string>,
