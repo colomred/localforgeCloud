@@ -8,6 +8,7 @@ import {
 } from "@/lib/features";
 import { getProject } from "@/lib/projects";
 import { getLatestTestResultsForProject } from "@/lib/agent/logs";
+import { listStepsForProject } from "@/lib/feature-steps";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -38,15 +39,31 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
   // in the project in a single query so the kanban card can render a pass/
   // fail badge without an N+1 round-trip per card.
   const testResults = getLatestTestResultsForProject(projectId);
-  const features = rows.map((f) => ({
-    ...f,
-    dependencyCount: countDependencies(f.id),
-    // Feature #52: include the full list of prerequisite IDs so the kanban
-    // board can draw a dependency-connector line between this card and each
-    // of its prerequisites without a second round-trip per card.
-    dependsOn: listDependencyIds(f.id),
-    testResult: testResults.get(f.id) ?? null,
-  }));
+  // Forge pipeline: bulk-fetch every feature's step checklist in one query
+  // so kanban cards render live step progress without an N+1.
+  const stepsByFeature = listStepsForProject(projectId);
+  const features = rows.map((f) => {
+    const steps = stepsByFeature.get(f.id) ?? [];
+    return {
+      ...f,
+      dependencyCount: countDependencies(f.id),
+      // Feature #52: include the full list of prerequisite IDs so the kanban
+      // board can draw a dependency-connector line between this card and each
+      // of its prerequisites without a second round-trip per card.
+      dependsOn: listDependencyIds(f.id),
+      testResult: testResults.get(f.id) ?? null,
+      steps: {
+        total: steps.length,
+        passed: steps.filter((s) => s.status === "passed").length,
+        items: steps.map((s) => ({
+          index: s.stepIndex,
+          title: s.title,
+          status: s.status,
+          attempts: s.attempts,
+        })),
+      },
+    };
+  });
   return NextResponse.json({ features });
 }
 

@@ -28,6 +28,8 @@ export type AppendAgentLogInput = {
   message: string;
   messageType?: AgentMessageType;
   screenshotPath?: string | null;
+  /** JSON payload for structured pipeline events (phase/verification/budget). */
+  meta?: string | null;
 };
 
 /** Insert a log row and return the inserted record. */
@@ -40,6 +42,7 @@ export function appendAgentLog(input: AppendAgentLogInput): AgentLogRecord {
       message: input.message,
       messageType: input.messageType ?? "info",
       screenshotPath: input.screenshotPath ?? null,
+      meta: input.meta ?? null,
     })
     .returning()
     .get();

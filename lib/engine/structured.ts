@@ -78,7 +78,9 @@ function balancedJsonSlice(text: string, start: number): string {
 
 export type GenerateStructuredOptions<T> = {
   client: ProviderClient;
-  schema: z.ZodType<T>;
+  // Input typed as unknown so schemas with .default() infer their OUTPUT
+  // type for T (input and output diverge on defaulted fields).
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>;
   /** Schema name passed to the provider (json_schema mode). */
   name: string;
   messages: ChatMessage[];
