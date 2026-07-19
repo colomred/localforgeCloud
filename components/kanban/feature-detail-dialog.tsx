@@ -707,7 +707,7 @@ export function FeatureDetailDialog({
                     Dependencies
                   </label>
                   <p className="text-xs text-muted-foreground">
-                    Features this one depends on. It will only be "ready"
+                    Features this one depends on. It will only be &quot;ready&quot;
                     after all dependencies are completed.
                   </p>
                   {depDetails.length > 0 ? (

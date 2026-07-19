@@ -41,11 +41,38 @@ export const features = sqliteTable(
     status: text("status").notNull().default("backlog"), // backlog | in_progress | completed
     priority: integer("priority").notNull().default(0),
     category: text("category").notNull().default("functional"), // functional | style
+    notePath: text("note_path"), // .localforge/notes/feature-<id>.md relative to the project dir
+    attemptCount: integer("attempt_count").notNull().default(0),
     createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
     updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
   },
   (t) => ({
     projectIdIdx: index("features_project_id_idx").on(t.projectId),
+  }),
+);
+
+export const featureSteps = sqliteTable(
+  "feature_steps",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    featureId: integer("feature_id")
+      .notNull()
+      .references(() => features.id, { onDelete: "cascade" }),
+    stepIndex: integer("step_index").notNull(),
+    title: text("title").notNull(),
+    detail: text("detail"),
+    status: text("status").notNull().default("planned"), // planned | running | verifying | fixing | passed | failed | skipped
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (t) => ({
+    featureStepUnique: uniqueIndex("feature_steps_feature_step_unique").on(
+      t.featureId,
+      t.stepIndex,
+    ),
+    featureIdIdx: index("feature_steps_feature_id_idx").on(t.featureId),
   }),
 );
 
@@ -99,6 +126,7 @@ export const agentLogs = sqliteTable(
     message: text("message").notNull(),
     messageType: text("message_type").notNull().default("info"), // info | action | error | screenshot | test_result
     screenshotPath: text("screenshot_path"),
+    meta: text("meta"), // JSON payload for structured pipeline events (phase | verification | budget)
     createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
   },
   (t) => ({

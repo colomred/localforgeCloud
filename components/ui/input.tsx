@@ -7,8 +7,7 @@ import { cn } from "@/lib/utils";
  * adapts to dark/light mode. Applied to form fields in the new-project
  * dialog and the settings page.
  */
-export interface InputProps
-  extends React.InputHTMLAttributes<HTMLInputElement> {}
+export type InputProps = React.InputHTMLAttributes<HTMLInputElement>;
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, type = "text", ...props }, ref) => {

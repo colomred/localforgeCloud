@@ -50,7 +50,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
       <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
         <h2>New workspace</h2>
         <p className="hint">
-          Point LocalForge at a project. We'll track features and deploy agents.
+          Point LocalForge at a project. We&apos;ll track features and deploy agents.
         </p>
 
         <label>Display name</label>
