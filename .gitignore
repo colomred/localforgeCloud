@@ -33,7 +33,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 dev-server.log
-agent-runner-debug.log
+forge-debug.log
 
 # Playwright MCP scratch output
 .playwright-mcp/

@@ -321,57 +321,62 @@ export function SettingsForm({ initial }: { initial: FormState }) {
           projects can override this in their own settings.
         </p>
       </div>
+      <Field
+        label="Context window (tokens)"
+        id="context_window"
+        description="Fallback context size when LocalForge can't detect what the loaded model actually supports. Match this to the context length you configured in LM Studio / Ollama — being honest here is what keeps small models from silently degrading."
+        value={values.context_window}
+        onChange={(v) => update("context_window", v)}
+        placeholder="8192"
+      />
       <div className="flex flex-col gap-2">
         <label
-          htmlFor="playwright_enabled"
+          htmlFor="project_template"
           className="text-sm font-medium text-foreground"
         >
-          Playwright verification
+          Project template
         </label>
         <select
-          id="playwright_enabled"
-          name="playwright_enabled"
-          data-testid="settings-playwright-enabled-select"
-          value={values.playwright_enabled}
-          onChange={(e) => update("playwright_enabled", e.target.value)}
+          id="project_template"
+          name="project_template"
+          data-testid="settings-project-template-select"
+          value={values.project_template}
+          onChange={(e) => update("project_template", e.target.value)}
           className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <option value="false">Disabled (default)</option>
-          <option value="true">Enabled</option>
+          <option value="next-app">Next.js app (default)</option>
+          <option value="vite-react">Vite + React</option>
+          <option value="none">None (agent starts from an empty folder)</option>
         </select>
         <p className="text-xs text-muted-foreground">
-          When enabled, every completed feature is verified by launching
-          Chromium against http://localhost:&lt;dev port&gt; and a screenshot
-          is captured. Many small local models can&apos;t drive a browser
-          reliably, so this is off by default — the coding agent&apos;s own
-          success signal becomes the outcome. Individual projects can
-          override this in their own settings.
+          New projects are scaffolded from this template by the harness itself
+          — dev-server port pre-wired, dependencies installed — so the model
+          never burns turns on project setup.
         </p>
       </div>
       <div className="flex flex-col gap-2">
         <label
-          htmlFor="playwright_headed"
+          htmlFor="spec_generation"
           className="text-sm font-medium text-foreground"
         >
-          Playwright headed browser
+          Spec generation
         </label>
         <select
-          id="playwright_headed"
-          name="playwright_headed"
-          data-testid="settings-playwright-headed-select"
-          value={values.playwright_headed}
-          onChange={(e) => update("playwright_headed", e.target.value)}
+          id="spec_generation"
+          name="spec_generation"
+          data-testid="settings-spec-generation-select"
+          value={values.spec_generation}
+          onChange={(e) => update("spec_generation", e.target.value)}
           className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <option value="false">Headless (default)</option>
-          <option value="true">Headed (visible window)</option>
+          <option value="false">Disabled (default)</option>
+          <option value="true">Enabled (non-fatal)</option>
         </select>
         <p className="text-xs text-muted-foreground">
-          When Playwright verification is enabled, runs post-run Chromium in a
-          visible window (with a short slowMo) and tells the coding agent to use{" "}
-          <code className="font-mono">playwright-cli open --headed</code>. On
-          CI (<code className="font-mono">CI</code> env set), verification stays
-          headless. Individual projects can override in project settings.
+          After a feature passes, the model writes a Playwright spec and the
+          harness executes it. Results show as a badge on the kanban card but
+          never fail the feature — small-model specs are informative, not
+          authoritative. The model never drives a browser interactively.
         </p>
       </div>
       <div className="flex items-center gap-3">

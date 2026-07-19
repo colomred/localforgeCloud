@@ -51,6 +51,8 @@ export default function RootLayout({
           href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,100..900;1,9..144,100..900&family=Inter:wght@300..700&family=JetBrains+Mono:wght@400;500;600&family=Caveat:wght@500;600;700&display=swap"
           rel="stylesheet"
         />
+        {/* Must run synchronously before paint to avoid a theme flash. */}
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script src="/theme-init.js" />
       </head>
       <body style={{ margin: 0, padding: 0, minHeight: "100vh", overflow: "hidden" }}>

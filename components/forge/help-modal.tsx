@@ -113,9 +113,9 @@ const TECH_CARDS = [
   },
   {
     Icon: Zap,
-    name: "Pi Coding Agent",
-    version: "@mariozechner/pi-coding-agent",
-    desc: "Autonomous coding agent that reads a feature description, writes code, runs Playwright tests, and reports pass or fail.",
+    name: "Forge Engine",
+    version: "step pipeline",
+    desc: "LocalForge's own agent engine, built for small local models: each feature is planned into small steps, run in fresh token-budgeted sessions, and verified by the harness (type-check, build, browser smoke).",
   },
   {
     Icon: FlaskConical,

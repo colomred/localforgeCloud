@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
+  // tests/unit runs under `npm run test:unit` (node:test); keep Playwright out.
+  testIgnore: ["unit/**", "mocks/**"],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -11,6 +13,11 @@ export default defineConfig({
     baseURL: process.env.BASE_URL || "http://localhost:7777",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // Environments with a system Chromium (CI images, sandboxes) can point
+    // at it instead of downloading a browser build.
+    launchOptions: process.env.LOCALFORGE_CHROMIUM_PATH
+      ? { executablePath: process.env.LOCALFORGE_CHROMIUM_PATH }
+      : {},
   },
   projects: [
     {

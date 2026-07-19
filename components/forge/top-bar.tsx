@@ -1,8 +1,9 @@
 "use client";
 
 import React from "react";
-import { HelpCircle } from "lucide-react";
+import { FileText, HelpCircle } from "lucide-react";
 import { useTheme } from "@/components/theme/theme-provider";
+import { BriefModal } from "@/components/forge/brief-modal";
 import {
   PlayIcon,
   PauseIcon,
@@ -42,6 +43,7 @@ export function TopBar({
   drawerOpen,
 }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
+  const [briefOpen, setBriefOpen] = React.useState(false);
 
   return (
     <div className="topbar">
@@ -114,6 +116,20 @@ export function TopBar({
           </button>
         )}
 
+        {activeProject && (
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => setBriefOpen(true)}
+            aria-label="View project brief"
+            title="Project brief"
+            data-testid="top-bar-brief-button"
+          >
+            <FileText size={14} />
+            <span className="tb-run-label">brief</span>
+          </button>
+        )}
+
         <button
           className="btn icon-btn ghost"
           onClick={onToggleDrawer}
@@ -151,6 +167,16 @@ export function TopBar({
           {theme === "dark" ? <SunIcon size={16} /> : <MoonIcon size={16} />}
         </button>
       </div>
+
+      {/* Read-only project-brief viewer; only mounted while a project is
+          active (the button that opens it is hidden otherwise). */}
+      {activeProject && (
+        <BriefModal
+          open={briefOpen}
+          onClose={() => setBriefOpen(false)}
+          projectId={activeProject.id}
+        />
+      )}
     </div>
   );
 }

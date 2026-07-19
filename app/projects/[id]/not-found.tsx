@@ -13,7 +13,7 @@ export default function ProjectNotFound() {
           Project not found
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          The project you're looking for doesn't exist or has been deleted.
+          The project you&apos;re looking for doesn&apos;t exist or has been deleted.
         </p>
         <div className="mt-6 flex justify-center">
           <Link href="/">

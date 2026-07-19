@@ -15,6 +15,20 @@
       "when": 1777196054782,
       "tag": "0001_spotty_viper",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784449031855,
+      "tag": "0002_thin_doorman",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1784464248997,
+      "tag": "0003_drop_legacy_settings",
+      "breakpoints": true
     }
   ]
 }

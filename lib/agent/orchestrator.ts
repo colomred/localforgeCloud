@@ -6,7 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 /* ──────────────────── Debug file logger ──────────────────── */
-const DEBUG_LOG_PATH = path.join(process.cwd(), "agent-runner-debug.log");
+const DEBUG_LOG_PATH = path.join(process.cwd(), "forge-debug.log");
 
 function debugLog(label: string, data?: unknown): void {
   try {
@@ -52,19 +52,47 @@ import {
   getEffectiveProviderConfig,
   getProjectEffectiveSettings,
   MAX_CONCURRENT_AGENTS_HARD_CAP,
+  parseContextWindow,
 } from "../settings";
+import {
+  parseRunnerLine,
+  type RunnerBudgetEvent,
+  type RunnerEvent,
+  type RunnerPhaseEvent,
+  type RunnerPlanEvent,
+  type RunnerStepEvent,
+  type RunnerVerificationEvent,
+} from "../engine/events";
+import {
+  resetStepsForRetry,
+  updateStepStatus,
+  replaceStepsForFeature,
+  isFeatureStepStatus,
+} from "../feature-steps";
+import {
+  incrementFeatureAttemptCount,
+  setFeatureNotePath,
+} from "../features";
+import {
+  clearFeatureNote,
+  noteRelativePath,
+  writeBrief,
+  writeFeatureNote,
+} from "../engine/memory";
+import type { PipelineJob } from "../engine/pipeline";
 
 /**
  * Coding-agent orchestrator.
  *
- * Responsibilities (features #63, #67, #68):
+ * Responsibilities:
  *   1. Pick the highest-priority ready backlog feature for a project and
  *      transition it to `in_progress`.
- *   2. Spawn a Pi AgentSession runner as a detached Node.js child process
- *      (scripts/agent-runner.mjs) wired to the project's local-model config.
- *   3. Parse the runner's JSON-lines stdout into agent_log rows and broadcast
- *      them to any live SSE subscribers (Feature #71 uses this via
- *      `subscribe(sessionId, listener)`).
+ *   2. Spawn the forge engine runner (scripts/engine-runner.ts) as a child
+ *      process with a self-contained job file (provider config, steps to
+ *      resume, memory paths).
+ *   3. Parse the runner's JSON-lines RunnerEvents: persist steps + logs
+ *      (structured events into agent_logs.meta), write brief/note files,
+ *      and broadcast everything to live SSE subscribers.
  *   4. When the runner exits, transition the feature to `completed` on
  *      success or demote it back to the backlog with a lowered priority on
  *      failure. Close the agent_session row in either case.
@@ -115,10 +143,35 @@ export type OrchestratorProjectCompletedEvent = {
   projectId: number;
 };
 
+/**
+ * Structured pipeline events from the forge engine runner, re-broadcast to
+ * SSE subscribers enriched with the session id. The UI renders step
+ * checklists, phase labels, verification chips and context meters from
+ * these; `plan`/`step` are also persisted to `feature_steps` and
+ * `phase`/`verification`/`budget(handoff)` to `agent_logs.meta` so
+ * reconnecting clients can replay the pipeline state.
+ */
+export type OrchestratorPipelineEvent = { sessionId: number } & (
+  | RunnerPlanEvent
+  | RunnerStepEvent
+  | RunnerPhaseEvent
+  | RunnerVerificationEvent
+  | RunnerBudgetEvent
+);
+
+/** The project brief file changed; open brief viewers refetch on this. */
+export type OrchestratorBriefUpdatedEvent = {
+  type: "brief_updated";
+  sessionId: number;
+  projectId: number;
+};
+
 export type OrchestratorEvent =
   | OrchestratorLogEvent
   | OrchestratorStatusEvent
-  | OrchestratorProjectCompletedEvent;
+  | OrchestratorProjectCompletedEvent
+  | OrchestratorPipelineEvent
+  | OrchestratorBriefUpdatedEvent;
 
 type RunningSession = {
   session: AgentSessionRecord;
@@ -127,12 +180,16 @@ type RunningSession = {
   stdoutBuffer: string;
   stderrBuffer: string;
   /**
-   * Absolute path to the JSON prompt file written for this run. The runner
-   * reads it on startup; the orchestrator cleans it up in the close handler.
+   * Absolute path to the JSON job file written for this run. The runner
+   * reads it on startup; the orchestrator cleans it up on close.
    */
   promptFile: string;
-  /** Watchdog timer — kills the runner if it hangs past the session deadline. */
+  /** Project folder — target for brief/note writes from runner events. */
+  projectDir: string;
+  /** Absolute watchdog — kills the runner past the hard session deadline. */
   watchdog?: ReturnType<typeof setTimeout>;
+  /** Inactivity watchdog (forge engine): no stdout for too long ⇒ kill. */
+  idleTimer?: ReturnType<typeof setTimeout>;
 };
 
 /**
@@ -155,8 +212,17 @@ export function getMaxConcurrentAgentsForProject(projectId: number): number {
   return Math.max(1, Math.min(MAX_CONCURRENT_AGENTS_CAP, n));
 }
 
-const SESSION_TIMEOUT_MS = Number.parseInt(
-  process.env.LOCALFORGE_SESSION_TIMEOUT_MS ?? String(30 * 60 * 1000),
+/**
+ * Watchdogs. The pipeline emits events constantly (every tool call, phase
+ * change, verification), so silence is the real hang signal — the absolute
+ * cap is only a backstop for pathological runs.
+ */
+const FORGE_IDLE_TIMEOUT_MS = Number.parseInt(
+  process.env.LOCALFORGE_IDLE_TIMEOUT_MS ?? String(10 * 60 * 1000),
+  10,
+);
+const FORGE_SESSION_TIMEOUT_MS = Number.parseInt(
+  process.env.LOCALFORGE_SESSION_TIMEOUT_MS ?? String(90 * 60 * 1000),
   10,
 );
 
@@ -374,10 +440,10 @@ export function startOrchestrator(projectId: number): StartResult {
     featureStatus: "in_progress",
   });
 
-  const { child, promptFile } = spawnAgentRunner({
+  const { child, promptFile } = spawnEngineRunner({
     session,
     feature: movedFeature,
-    projectDir: project.folderPath,
+    project,
   });
 
   const rs: RunningSession = {
@@ -387,43 +453,26 @@ export function startOrchestrator(projectId: number): StartResult {
     stdoutBuffer: "",
     stderrBuffer: "",
     promptFile,
+    projectDir: project.folderPath,
   };
   getState().running.set(session.id, rs);
 
   attachChildHandlers(rs);
 
-  // Watchdog: kill the runner if it exceeds the session timeout. This
-  // prevents a hung runner (e.g. Playwright waiting on a dead server, or a
-  // dev server keeping the process alive) from blocking the entire pipeline.
-  if (SESSION_TIMEOUT_MS > 0) {
+  // Absolute watchdog: kill the runner past the hard session deadline.
+  // Silence, not duration, is the real hang signal (see the idle watchdog),
+  // so the cap is generous.
+  if (FORGE_SESSION_TIMEOUT_MS > 0) {
     rs.watchdog = setTimeout(() => {
-      if (!getState().running.has(session.id)) return;
-      const log = appendAgentLog({
-        sessionId: session.id,
-        featureId: movedFeature.id,
-        message: `Session watchdog: runner exceeded ${Math.round(SESSION_TIMEOUT_MS / 1000 / 60)}min timeout — killing`,
-        messageType: "error",
-      });
-      broadcast({
-        type: "log",
-        sessionId: session.id,
-        featureId: movedFeature.id,
-        message: log.message,
-        messageType: "error",
-        screenshotPath: log.screenshotPath,
-        createdAt: log.createdAt,
-        logId: log.id,
-      });
-      try {
-        child.kill("SIGTERM");
-      } catch { /* best-effort */ }
-      setTimeout(() => {
-        try {
-          if (!child.killed) child.kill("SIGKILL");
-        } catch { /* noop */ }
-      }, 1000).unref();
-    }, SESSION_TIMEOUT_MS);
+      killForWatchdog(
+        rs,
+        `Session watchdog: runner exceeded ${Math.round(FORGE_SESSION_TIMEOUT_MS / 1000 / 60)}min timeout — killing`,
+      );
+    }, FORGE_SESSION_TIMEOUT_MS);
     rs.watchdog.unref();
+  }
+  if (FORGE_IDLE_TIMEOUT_MS > 0) {
+    armIdleWatchdog(rs);
   }
 
   return { session, feature: movedFeature, started: true };
@@ -480,101 +529,147 @@ export class OrchestratorError extends Error {
   }
 }
 
+/** Kill a runner because a watchdog fired; logs + lets close() finalize. */
+function killForWatchdog(rs: RunningSession, message: string): void {
+  if (!getState().running.has(rs.session.id)) return;
+  const log = appendAgentLog({
+    sessionId: rs.session.id,
+    featureId: rs.feature.id,
+    message,
+    messageType: "error",
+  });
+  broadcast({
+    type: "log",
+    sessionId: rs.session.id,
+    featureId: rs.feature.id,
+    message: log.message,
+    messageType: "error",
+    screenshotPath: log.screenshotPath,
+    createdAt: log.createdAt,
+    logId: log.id,
+  });
+  try {
+    rs.child.kill("SIGTERM");
+  } catch {
+    /* best-effort */
+  }
+  setTimeout(() => {
+    try {
+      if (!rs.child.killed) rs.child.kill("SIGKILL");
+    } catch {
+      /* noop */
+    }
+  }, 1000).unref();
+}
+
+/** (Re)arm the forge idle watchdog; called on every stdout line. */
+function armIdleWatchdog(rs: RunningSession): void {
+  if (rs.idleTimer) clearTimeout(rs.idleTimer);
+  rs.idleTimer = setTimeout(() => {
+    killForWatchdog(
+      rs,
+      `Idle watchdog: no runner output for ${Math.round(FORGE_IDLE_TIMEOUT_MS / 1000 / 60)}min — killing`,
+    );
+  }, FORGE_IDLE_TIMEOUT_MS);
+  rs.idleTimer.unref();
+}
+
 /* --------------------------- Child process ---------------------------- */
 
-function spawnAgentRunner(args: {
+/**
+ * Spawn the forge engine runner (scripts/engine-runner.ts) for a feature.
+ * The child is TypeScript executed via tsx; it is spawned from the harness
+ * root so `--import tsx` resolves from the harness's node_modules, and it
+ * receives everything it needs in a single job file — no DB, no settings.
+ */
+function spawnEngineRunner(args: {
   session: AgentSessionRecord;
   feature: FeatureRecord;
-  projectDir: string;
+  project: { id: number; name: string; folderPath: string };
 }): { child: ChildProcessWithoutNullStreams; promptFile: string } {
-  const runnerPath = path.join(process.cwd(), "scripts", "agent-runner.mjs");
+  const harnessRoot = process.cwd();
+  const runnerPath = path.join(harnessRoot, "scripts", "engine-runner.ts");
   const { baseUrl, model, provider } = getEffectiveProviderConfig(
     args.session.projectId,
   );
-  const effectiveSettings = getProjectEffectiveSettings(args.session.projectId);
-  const coderPrompt = effectiveSettings.coder_prompt || "";
-  const devServerPort = effectiveSettings.dev_server_port || "3000";
-  // Resolved per-project; the runner reads this env var to decide whether
-  // to skip the Playwright verification phase entirely. Default is "false".
-  const playwrightEnabled =
-    effectiveSettings.playwright_enabled === "true" ? "true" : "false";
-  const playwrightHeaded =
-    effectiveSettings.playwright_headed === "true" ? "true" : "false";
+  const eff = getProjectEffectiveSettings(args.session.projectId);
 
-  // Write the feature context to a temp JSON file so the runner can read
-  // long descriptions and acceptance criteria without argv escaping pain.
+  // Prepare steps for a potential resume: passed steps survive, everything
+  // else resets to planned. A feature on its first attempt has no rows and
+  // the pipeline will run its PLAN pass.
+  const stepRows = resetStepsForRetry(args.feature.id);
+
+  const slug =
+    args.feature.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "feature";
+  const screenshotRelPath = `screenshots/feature-${args.feature.id}-${slug}.png`;
+  const screenshotPath = path.join(harnessRoot, screenshotRelPath);
+
+  const job: PipelineJob = {
+    sessionId: args.session.id,
+    feature: {
+      id: args.feature.id,
+      title: args.feature.title,
+      description: args.feature.description,
+      acceptanceCriteria: args.feature.acceptanceCriteria,
+    },
+    projectDir: args.project.folderPath,
+    projectName: args.project.name,
+    provider: provider === "ollama" ? "ollama" : "lm_studio",
+    baseUrl,
+    model,
+    devServerPort: eff.dev_server_port || "3000",
+    template: eff.project_template || "next-app",
+    coderPrompt: eff.coder_prompt || "",
+    contextWindowFallback: parseContextWindow(eff.context_window),
+    specGeneration: eff.spec_generation === "true",
+    harnessRoot,
+    screenshotPath,
+    screenshotRelPath,
+    existingSteps: stepRows.map((row) => ({
+      index: row.stepIndex,
+      title: row.title,
+      detail: row.detail ?? "",
+      status: row.status,
+    })),
+  };
+
   const promptFile = path.join(
     os.tmpdir(),
-    `localforge-prompt-${args.session.id}.json`,
+    `localforge-job-${args.session.id}.json`,
   );
-  fs.writeFileSync(
-    promptFile,
-    JSON.stringify(
-      {
-        id: args.feature.id,
-        title: args.feature.title,
-        description: args.feature.description,
-        acceptanceCriteria: args.feature.acceptanceCriteria,
-        coderPrompt,
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
+  fs.writeFileSync(promptFile, JSON.stringify(job, null, 2), "utf8");
 
-  const argv = [
-    runnerPath,
-    "--session-id",
-    String(args.session.id),
-    "--feature-id",
-    String(args.feature.id),
-    "--feature-title",
-    args.feature.title,
-    "--prompt-file",
-    promptFile,
-    "--project-dir",
-    args.projectDir,
-    "--base-url",
-    baseUrl,
-    "--provider",
-    provider,
-    "--model",
-    model,
-  ];
-
-  debugLog("═══════════════════════ NEW SESSION ═══════════════════════");
-  debugLog("SPAWN_RUNNER", {
+  debugLog("═══════════════════ NEW FORGE SESSION ═══════════════════");
+  debugLog("SPAWN_ENGINE_RUNNER", {
     sessionId: args.session.id,
     featureId: args.feature.id,
     featureTitle: args.feature.title,
-    projectDir: args.projectDir,
+    projectDir: args.project.folderPath,
     baseUrl,
     model,
     provider,
-    runnerPath,
-    promptFile,
-    nodeExec: process.execPath,
-    sessionTimeoutMs: SESSION_TIMEOUT_MS,
-    playwrightEnabled,
-    playwrightHeaded,
+    existingSteps: job.existingSteps.length,
+    contextWindowFallback: job.contextWindowFallback,
   });
 
-  const child = spawn(process.execPath, argv, {
-    cwd: args.projectDir,
-    env: {
-      ...process.env,
-      LOCALFORGE_SESSION_ID: String(args.session.id),
-      LOCALFORGE_FEATURE_ID: String(args.feature.id),
-      LOCALFORGE_DEV_SERVER_PORT: devServerPort,
-      LOCALFORGE_PLAYWRIGHT_BASE_URL: `http://localhost:${devServerPort}`,
-      LOCALFORGE_PLAYWRIGHT_ENABLED: playwrightEnabled,
-      LOCALFORGE_PLAYWRIGHT_HEADED: playwrightHeaded,
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", runnerPath, "--job-file", promptFile],
+    {
+      cwd: harnessRoot,
+      env: { ...process.env },
+      stdio: "pipe",
     },
-    stdio: "pipe",
-  });
+  ) as ChildProcessWithoutNullStreams;
 
-  debugLog("SPAWN_RUNNER_PID", { pid: child.pid, sessionId: args.session.id });
+  debugLog("SPAWN_ENGINE_RUNNER_PID", {
+    pid: child.pid,
+    sessionId: args.session.id,
+  });
   return { child, promptFile };
 }
 
@@ -685,76 +780,150 @@ function attachChildHandlers(rs: RunningSession): void {
   });
 }
 
-type RunnerLogLine = {
-  type: "log";
-  message: string;
-  messageType?: string;
-  screenshotPath?: string | null;
-};
-type RunnerDoneLine = {
-  type: "done";
-  outcome: "success" | "failure";
-  reason?: string;
-};
-type RunnerLine = RunnerLogLine | RunnerDoneLine;
+/** Persist a log row (optionally with structured meta) and broadcast it. */
+function persistLog(
+  rs: RunningSession,
+  message: string,
+  messageType: AgentMessageType,
+  screenshotPath: string | null = null,
+  meta: string | null = null,
+): void {
+  const log = appendAgentLog({
+    sessionId: rs.session.id,
+    featureId: rs.feature.id,
+    message,
+    messageType,
+    screenshotPath,
+    meta,
+  });
+  broadcast({
+    type: "log",
+    sessionId: rs.session.id,
+    featureId: rs.feature.id,
+    message: log.message,
+    messageType,
+    screenshotPath: log.screenshotPath,
+    createdAt: log.createdAt,
+    logId: log.id,
+  });
+}
 
 function handleRunnerLine(rs: RunningSession, raw: string): void {
-  let parsed: RunnerLine | null = null;
-  try {
-    const obj = JSON.parse(raw) as RunnerLine;
-    parsed = obj;
-  } catch {
-    // Not JSON — treat it as a raw info log so nothing is lost.
-    const log = appendAgentLog({
-      sessionId: rs.session.id,
-      featureId: rs.feature.id,
-      message: raw,
-      messageType: "info",
-    });
-    broadcast({
-      type: "log",
-      sessionId: rs.session.id,
-      featureId: rs.feature.id,
-      message: log.message,
-      messageType: "info",
-      screenshotPath: log.screenshotPath,
-      createdAt: log.createdAt,
-      logId: log.id,
-    });
+  armIdleWatchdog(rs);
+
+  const event: RunnerEvent | null = parseRunnerLine(raw);
+  if (!event) {
+    // Not a protocol line (stray console noise) — keep it as a raw info log.
+    persistLog(rs, raw, "info");
     return;
   }
 
-  if (parsed.type === "log") {
-    const messageType = normaliseMessageType(parsed.messageType);
-    const log = appendAgentLog({
-      sessionId: rs.session.id,
-      featureId: rs.feature.id,
-      message: parsed.message,
-      messageType,
-      screenshotPath: parsed.screenshotPath ?? null,
-    });
-    broadcast({
-      type: "log",
-      sessionId: rs.session.id,
-      featureId: rs.feature.id,
-      message: log.message,
-      messageType,
-      screenshotPath: log.screenshotPath,
-      createdAt: log.createdAt,
-      logId: log.id,
-    });
-    return;
-  }
+  switch (event.type) {
+    case "log":
+      persistLog(
+        rs,
+        event.message,
+        normaliseMessageType(event.messageType),
+        event.screenshotPath ?? null,
+      );
+      return;
 
-  if (parsed.type === "done") {
-    const outcome = parsed.outcome;
-    debugLog("RUNNER_DONE_EVENT", {
-      sessionId: rs.session.id,
-      featureId: rs.feature.id,
-      outcome,
-      reason: (parsed as RunnerDoneLine).reason,
-    });
-    finalizeSession(rs, outcome === "success" ? "success" : "failed");
+    case "done":
+      debugLog("RUNNER_DONE_EVENT", {
+        sessionId: rs.session.id,
+        featureId: rs.feature.id,
+        outcome: event.outcome,
+        reason: event.reason,
+        failedStepIndex: event.failedStepIndex,
+      });
+      finalizeSession(rs, event.outcome === "success" ? "success" : "failed");
+      return;
+
+    case "plan":
+      replaceStepsForFeature(
+        rs.feature.id,
+        event.steps.map((s) => ({
+          stepIndex: s.index,
+          title: s.title,
+          detail: s.detail,
+        })),
+      );
+      broadcast({ ...event, sessionId: rs.session.id });
+      return;
+
+    case "step":
+      if (isFeatureStepStatus(event.status)) {
+        updateStepStatus(rs.feature.id, event.stepIndex, {
+          status: event.status,
+          error: event.error ?? null,
+          attempt: event.attempt,
+        });
+      }
+      broadcast({ ...event, sessionId: rs.session.id });
+      return;
+
+    case "phase": {
+      const stepPart =
+        event.stepIndex != null
+          ? ` (step ${event.stepIndex + 1}${event.stepCount ? `/${event.stepCount}` : ""})`
+          : "";
+      persistLog(
+        rs,
+        `Phase: ${event.phase}${stepPart}`,
+        "info",
+        null,
+        JSON.stringify(event),
+      );
+      broadcast({ ...event, sessionId: rs.session.id });
+      return;
+    }
+
+    case "verification":
+      persistLog(rs, event.summary, "test_result", null, JSON.stringify(event));
+      broadcast({ ...event, sessionId: rs.session.id });
+      return;
+
+    case "budget":
+      // Snapshots are frequent; only handoffs are worth a durable log row.
+      if (event.handoff) {
+        persistLog(
+          rs,
+          `Context handoff at ${event.usedTokens}/${event.limitTokens} tokens — respawning session`,
+          "info",
+          null,
+          JSON.stringify(event),
+        );
+      }
+      broadcast({ ...event, sessionId: rs.session.id });
+      return;
+
+    case "brief":
+      try {
+        writeBrief(rs.projectDir, event.content);
+        broadcast({
+          type: "brief_updated",
+          sessionId: rs.session.id,
+          projectId: rs.session.projectId,
+        });
+      } catch (err) {
+        debugLog("BRIEF_WRITE_FAILED", {
+          sessionId: rs.session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+
+    case "note":
+      try {
+        writeFeatureNote(rs.projectDir, event.featureId, event.content);
+        setFeatureNotePath(event.featureId, noteRelativePath(event.featureId));
+      } catch (err) {
+        debugLog("NOTE_WRITE_FAILED", {
+          sessionId: rs.session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
   }
 }
 
@@ -796,6 +965,10 @@ function finalizeSession(
     rs.watchdog = undefined;
     debugLog("WATCHDOG_CLEARED", { sessionId: rs.session.id });
   }
+  if (rs.idleTimer) {
+    clearTimeout(rs.idleTimer);
+    rs.idleTimer = undefined;
+  }
 
   // Best-effort cleanup of the temp prompt file the runner consumed.
   try {
@@ -810,6 +983,13 @@ function finalizeSession(
   if (outcome === "success") {
     finalSessionStatus = "completed";
     finalFeature = updateFeature(rs.feature.id, { status: "completed" });
+    // The feature is done — its progress/failure note has served its purpose.
+    try {
+      clearFeatureNote(rs.projectDir, rs.feature.id);
+      setFeatureNotePath(rs.feature.id, null);
+    } catch {
+      /* best-effort */
+    }
     const log = appendAgentLog({
       sessionId: rs.session.id,
       featureId: rs.feature.id,
@@ -828,6 +1008,7 @@ function finalizeSession(
     });
   } else if (outcome === "failed") {
     finalSessionStatus = "failed";
+    incrementFeatureAttemptCount(rs.feature.id);
     const demoted = demoteFeatureToBacklog(rs.feature.id);
     finalFeature = demoted;
     const log = appendAgentLog({

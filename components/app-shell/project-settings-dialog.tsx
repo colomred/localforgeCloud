@@ -56,8 +56,9 @@ type ProjectSettingsResponse = {
     coder_prompt: string | null;
     dev_server_port: string | null;
     max_concurrent_agents: string | null;
-    playwright_enabled: string | null;
-    playwright_headed: string | null;
+    context_window: string | null;
+    project_template: string | null;
+    spec_generation: string | null;
   };
   effective: {
     provider: string;
@@ -67,8 +68,9 @@ type ProjectSettingsResponse = {
     coder_prompt: string;
     dev_server_port: string;
     max_concurrent_agents: string;
-    playwright_enabled: string;
-    playwright_headed: string;
+    context_window: string;
+    project_template: string;
+    spec_generation: string;
   };
   defaults: {
     provider: string;
@@ -78,17 +80,14 @@ type ProjectSettingsResponse = {
     coder_prompt: string;
     dev_server_port: string;
     max_concurrent_agents: string;
-    playwright_enabled: string;
-    playwright_headed: string;
+    context_window: string;
+    project_template: string;
+    spec_generation: string;
   };
 };
 
-function describePlaywrightEnabled(raw: string): string {
+function describeSpecGeneration(raw: string): string {
   return raw === "true" ? "Enabled" : "Disabled";
-}
-
-function describePlaywrightHeaded(raw: string): string {
-  return raw === "true" ? "Headed" : "Headless";
 }
 
 type ModelsProbe =
@@ -120,8 +119,7 @@ export function ProjectSettingsDialog({
   const [coderPrompt, setCoderPrompt] = React.useState("");
   const [devServerPort, setDevServerPort] = React.useState("");
   const [maxConcurrentAgents, setMaxConcurrentAgents] = React.useState("");
-  const [playwrightEnabled, setPlaywrightEnabled] = React.useState("");
-  const [playwrightHeaded, setPlaywrightHeaded] = React.useState("");
+  const [specGeneration, setSpecGeneration] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -155,8 +153,7 @@ export function ProjectSettingsDialog({
         setCoderPrompt(complete.overrides.coder_prompt ?? "");
         setDevServerPort(complete.overrides.dev_server_port ?? "");
         setMaxConcurrentAgents(complete.overrides.max_concurrent_agents ?? "");
-        setPlaywrightEnabled(complete.overrides.playwright_enabled ?? "");
-        setPlaywrightHeaded(complete.overrides.playwright_headed ?? "");
+        setSpecGeneration(complete.overrides.spec_generation ?? "");
       } catch (err) {
         if (cancelled) return;
         setError(
@@ -244,8 +241,7 @@ export function ProjectSettingsDialog({
           coder_prompt: coderPrompt,
           dev_server_port: devServerPort,
           max_concurrent_agents: maxConcurrentAgents,
-          playwright_enabled: playwrightEnabled,
-          playwright_headed: playwrightHeaded,
+          spec_generation: specGeneration,
         }),
       });
       const payload = (await res.json()) as Partial<ProjectSettingsResponse> & {
@@ -452,66 +448,34 @@ export function ProjectSettingsDialog({
               </div>
               <div className="flex flex-col gap-1">
                 <label
-                  htmlFor="project-playwright-enabled"
+                  htmlFor="project-spec-generation"
                   className="text-sm font-medium text-foreground"
                 >
-                  Playwright verification
+                  Spec generation
                 </label>
                 <select
-                  id="project-playwright-enabled"
-                  name="project-playwright-enabled"
-                  data-testid="project-settings-playwright-enabled-select"
-                  value={playwrightEnabled}
-                  onChange={(e) => setPlaywrightEnabled(e.target.value)}
+                  id="project-spec-generation"
+                  name="project-spec-generation"
+                  data-testid="project-settings-spec-generation-select"
+                  value={specGeneration}
+                  onChange={(e) => setSpecGeneration(e.target.value)}
                   disabled={submitting}
                   className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <option value="">
-                    Use global default ({describePlaywrightEnabled(
-                      data.defaults.playwright_enabled,
+                    Use global default ({describeSpecGeneration(
+                      data.defaults.spec_generation,
                     )})
                   </option>
                   <option value="false">Disabled</option>
-                  <option value="true">Enabled</option>
+                  <option value="true">Enabled (non-fatal)</option>
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  {data.overrides.playwright_enabled
+                  {data.overrides.spec_generation
                     ? "Project override is set. Choose 'Use global default' to clear."
-                    : `Using the global default (${describePlaywrightEnabled(
-                        data.defaults.playwright_enabled,
-                      )}). When enabled, every completed feature is verified by launching Chromium against the dev server. Many small local models can't drive a browser reliably — leaving it off treats the coding agent's own success as the outcome.`}
-                </p>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label
-                  htmlFor="project-playwright-headed"
-                  className="text-sm font-medium text-foreground"
-                >
-                  Playwright headed browser
-                </label>
-                <select
-                  id="project-playwright-headed"
-                  name="project-playwright-headed"
-                  data-testid="project-settings-playwright-headed-select"
-                  value={playwrightHeaded}
-                  onChange={(e) => setPlaywrightHeaded(e.target.value)}
-                  disabled={submitting}
-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <option value="">
-                    Use global default ({describePlaywrightHeaded(
-                      data.defaults.playwright_headed,
-                    )})
-                  </option>
-                  <option value="false">Headless</option>
-                  <option value="true">Headed (visible window)</option>
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  {data.overrides.playwright_headed
-                    ? "Project override is set. Choose 'Use global default' to clear."
-                    : `Using the global default (${describePlaywrightHeaded(
-                        data.defaults.playwright_headed,
-                      )}). Applies when verification is on; CI forces headless.`}
+                    : `Using the global default (${describeSpecGeneration(
+                        data.defaults.spec_generation,
+                      )}). After a feature passes, the model writes a Playwright spec and the harness runs it; results show as a badge but never fail the feature.`}
                 </p>
               </div>
               <div
@@ -549,15 +513,13 @@ export function ProjectSettingsDialog({
                   Model: <span>{data.effective.model}</span>
                 </p>
                 <p>
-                  Playwright verification:{" "}
-                  <span>
-                    {describePlaywrightEnabled(data.effective.playwright_enabled)}
-                  </span>
+                  Context window:{" "}
+                  <span>{data.effective.context_window} tokens</span>
                 </p>
                 <p>
-                  Playwright headed:{" "}
+                  Spec generation:{" "}
                   <span>
-                    {describePlaywrightHeaded(data.effective.playwright_headed)}
+                    {describeSpecGeneration(data.effective.spec_generation)}
                   </span>
                 </p>
               </div>

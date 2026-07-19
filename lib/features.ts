@@ -242,6 +242,42 @@ export function deleteFeature(id: number): boolean {
   return true;
 }
 
+/**
+ * Record another attempt at a feature. Called by the orchestrator when a
+ * runner session for the feature ends in failure, so the detail dialog can
+ * show retry history and notes can accumulate per attempt.
+ */
+export function incrementFeatureAttemptCount(id: number): FeatureRecord | null {
+  const existing = getFeature(id);
+  if (!existing) return null;
+  return (
+    db
+      .update(features)
+      .set({
+        attemptCount: existing.attemptCount + 1,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(features.id, id))
+      .returning()
+      .get() ?? null
+  );
+}
+
+/** Persist the project-relative path of the feature's progress/failure note. */
+export function setFeatureNotePath(
+  id: number,
+  notePath: string | null,
+): FeatureRecord | null {
+  return (
+    db
+      .update(features)
+      .set({ notePath, updatedAt: new Date().toISOString() })
+      .where(eq(features.id, id))
+      .returning()
+      .get() ?? null
+  );
+}
+
 /* --------------------------- Dependencies --------------------------- */
 
 export type FeatureDependencyRecord =
