@@ -60,6 +60,8 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
           title: s.title,
           status: s.status,
           attempts: s.attempts,
+          detail: s.detail,
+          lastError: s.lastError,
         })),
       },
     };

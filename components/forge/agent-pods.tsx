@@ -20,12 +20,28 @@ export type LogLine = {
   cls: string; // "cmd", "dim", "grn", "red", "yel", or ""
 };
 
+/**
+ * Live pipeline state for a running forge-engine session, accumulated from
+ * phase/step/plan/budget SSE events by project-view. Absent for pi-engine
+ * sessions (which emit no pipeline events) and idle pods.
+ */
+export type PipelineState = {
+  phase?: string;
+  stepIndex?: number;
+  stepCount?: number;
+  stepTitle?: string;
+  passedSteps?: number;
+  budget?: { usedTokens: number; limitTokens: number; handoff?: boolean };
+};
+
 export type AgentPodData = AgentSlotData & {
   logs: LogLine[];
   progress: number;
   mood: string;
   /** Cosmetic alias assigned at session start; falls back to "Agent N". */
   name?: string;
+  /** Structured pipeline state (forge engine only). */
+  pipeline?: PipelineState;
 };
 
 export type AgentPodsProps = {
@@ -57,6 +73,115 @@ const ExpandIcon: React.FC<{ size?: number }> = ({ size = 16 }) => (
     <line x1="3" y1="21" x2="10" y2="14" />
   </svg>
 );
+
+/* ──────────────────── Pipeline helpers ──────────────────── */
+
+/**
+ * Derive the pod's live status line from the pipeline phase. Returns null
+ * when there is no pipeline state (pi-engine sessions fall back to mood).
+ */
+function pipelineStatusLine(p?: PipelineState): string | null {
+  if (!p?.phase) return null;
+  const stepPart =
+    p.stepIndex != null
+      ? `Step ${p.stepIndex + 1}${p.stepCount ? `/${p.stepCount}` : ""}`
+      : null;
+  switch (p.phase) {
+    case "scaffold":
+      return "Scaffolding…";
+    case "plan":
+      return "Planning…";
+    case "step":
+      return stepPart ? `${stepPart} — implementing` : "Implementing…";
+    case "verify":
+      return stepPart ? `${stepPart} — verifying` : "Verifying…";
+    case "fix":
+      return stepPart ? `${stepPart} — fixing` : "Fixing…";
+    case "smoke":
+      return "Smoke test";
+    case "summarize":
+      return "Updating brief";
+    default:
+      return null;
+  }
+}
+
+/** Real progress (passed steps / step count) or null when unknown. */
+function pipelineProgress(p?: PipelineState): number | null {
+  if (!p?.stepCount || p.stepCount <= 0) return null;
+  return Math.round(((p.passedSteps ?? 0) / p.stepCount) * 100);
+}
+
+/* ──────────────────── ContextMeter sub-component ──────────────────── */
+
+function contextPct(budget: NonNullable<PipelineState["budget"]>): number {
+  if (budget.limitTokens <= 0) return 0;
+  return Math.min(
+    100,
+    Math.max(0, Math.round((budget.usedTokens / budget.limitTokens) * 100)),
+  );
+}
+
+/**
+ * Slim context-budget meter. Neutral below 60%, amber 60-80%, red above 80%.
+ * When mounted for a handoff snapshot (parent keys the component on the
+ * handoff event) a transient ring flashes via the lf-ctx-flash keyframes.
+ */
+function ContextMeter({
+  budget,
+}: {
+  budget: NonNullable<PipelineState["budget"]>;
+}) {
+  const pct = contextPct(budget);
+  const fill =
+    pct > 80 ? "var(--bad)" : pct >= 60 ? "var(--warn)" : "var(--ink-3)";
+  return (
+    <div
+      data-testid="agent-pod-context-meter"
+      data-ctx-pct={pct}
+      title={`context: ${budget.usedTokens.toLocaleString()} / ${budget.limitTokens.toLocaleString()} tokens`}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        marginTop: 6,
+        borderRadius: 4,
+        animation: budget.handoff ? "lf-ctx-flash 1.4s ease-out" : undefined,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9.5,
+          letterSpacing: "0.04em",
+          color: pct >= 60 ? fill : "var(--ink-3)",
+          flexShrink: 0,
+        }}
+      >
+        ctx {pct}%
+      </span>
+      <div
+        style={{
+          flex: 1,
+          height: 3,
+          background: "var(--bg-2)",
+          border: "1px solid var(--line)",
+          borderRadius: 3,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: fill,
+            transition: "width .6s ease, background .3s ease",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
 
 /* ──────────────────── PodLog sub-component ──────────────────── */
 
@@ -119,6 +244,8 @@ export function AgentPods({
 
   return (
     <section className="pods-section">
+      {/* Transient ring flash for the context meter on budget handoff */}
+      <style>{`@keyframes lf-ctx-flash { 0% { box-shadow: 0 0 0 2px var(--warn); } 100% { box-shadow: 0 0 0 6px rgba(0,0,0,0); } }`}</style>
       {/* Header */}
       <div className="pods-head">
         <h2 className="pods-title">
@@ -147,6 +274,10 @@ export function AgentPods({
       >
         {slots.map((slot) => {
           const isDragOver = dragOverSlot === slot.slotIndex;
+          const statusLine = pipelineStatusLine(slot.pipeline);
+          const realProgress = pipelineProgress(slot.pipeline);
+          const progress = realProgress ?? slot.progress;
+          const budget = slot.pipeline?.budget;
           const podClass = [
             "pod",
             slot.running ? "running" : "",
@@ -180,7 +311,9 @@ export function AgentPods({
                       <div className="pod-name">
                         {slot.name ?? `Agent ${slot.slotIndex + 1}`}
                       </div>
-                      <div className="pod-state live">{slot.mood}</div>
+                      <div className="pod-state live">
+                        {statusLine ?? slot.mood}
+                      </div>
                     </div>
                     <span className="pod-status live">
                       <span className="bullet" />
@@ -198,12 +331,37 @@ export function AgentPods({
                       {slot.featureId != null && (
                         <span>#{slot.featureId}</span>
                       )}
+                      {slot.pipeline?.stepTitle && (
+                        <span
+                          style={{
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            minWidth: 0,
+                          }}
+                          title={slot.pipeline.stepTitle}
+                        >
+                          {slot.pipeline.stepTitle}
+                        </span>
+                      )}
                     </div>
                     <div className="pod-progress">
                       <div
-                        style={{ width: `${Math.min(slot.progress, 100)}%` }}
+                        style={{ width: `${Math.min(progress, 100)}%` }}
                       />
                     </div>
+                    {budget && (
+                      <ContextMeter
+                        // Remount on a handoff snapshot so the ring flash
+                        // animation re-runs for every handoff event.
+                        key={
+                          budget.handoff
+                            ? `handoff-${budget.usedTokens}`
+                            : "ctx"
+                        }
+                        budget={budget}
+                      />
+                    )}
                   </div>
 
                   {/* Terminal log */}
@@ -235,7 +393,10 @@ export function AgentPods({
                     </button>
                     <span className="spacer" />
                     <span className="tag">
-                      {Math.round(slot.progress)}%
+                      {realProgress != null &&
+                      slot.pipeline?.stepCount != null
+                        ? `${slot.pipeline.passedSteps ?? 0}/${slot.pipeline.stepCount} steps`
+                        : `${Math.round(progress)}%`}
                     </span>
                   </div>
                 </>

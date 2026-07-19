@@ -103,6 +103,7 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
             message: row.message,
             messageType: row.messageType as AgentMessageType,
             screenshotPath: row.screenshotPath,
+            meta: row.meta,
             createdAt: row.createdAt,
             logId: row.id,
             replayed: true,

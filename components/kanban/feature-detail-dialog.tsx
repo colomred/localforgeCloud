@@ -2,14 +2,20 @@
 
 import * as React from "react";
 import {
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Circle,
   Images,
+  ListChecks,
   Loader2,
   Link2,
+  MinusCircle,
+  StickyNote,
   TerminalSquare,
   Trash2,
   X as XIcon,
+  XCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +28,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { FeatureCardData } from "./feature-card";
+import type {
+  FeatureCardData,
+  FeatureStepDisplayStatus,
+} from "./feature-card";
 
 const TITLE_MAX = 200;
 const DESC_MAX = 5000;
@@ -36,8 +45,69 @@ type AgentLogEntry = {
   message: string;
   messageType: "info" | "action" | "error" | "screenshot" | "test_result";
   screenshotPath: string | null;
+  /** JSON payload for structured pipeline events (verification/phase/budget). */
+  meta?: string | null;
   createdAt: string;
 };
+
+/** A parsed `{type:"verification"}` meta payload from an agent_log row. */
+type VerificationChip = {
+  logId: number;
+  kind: string;
+  ok: boolean;
+  errorCount: number;
+  summary: string;
+};
+
+/** Status icon for one pipeline step row in the "Pipeline" section. */
+function StepStatusIcon({ status }: { status: FeatureStepDisplayStatus }) {
+  switch (status) {
+    case "passed":
+      return (
+        <CheckCircle2
+          className="h-3.5 w-3.5 shrink-0 text-emerald-400"
+          aria-hidden="true"
+        />
+      );
+    case "failed":
+      return (
+        <XCircle
+          className="h-3.5 w-3.5 shrink-0 text-destructive"
+          aria-hidden="true"
+        />
+      );
+    case "running":
+      return (
+        <Loader2
+          className="h-3.5 w-3.5 shrink-0 animate-spin text-primary"
+          aria-hidden="true"
+        />
+      );
+    case "verifying":
+    case "fixing":
+      return (
+        <Loader2
+          className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-500"
+          aria-hidden="true"
+        />
+      );
+    case "skipped":
+      return (
+        <MinusCircle
+          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+          aria-hidden="true"
+        />
+      );
+    case "planned":
+    default:
+      return (
+        <Circle
+          className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60"
+          aria-hidden="true"
+        />
+      );
+  }
+}
 
 function logBadgeClass(mt: AgentLogEntry["messageType"]) {
   switch (mt) {
@@ -143,6 +213,11 @@ export function FeatureDetailDialog({
   const [logsLoading, setLogsLoading] = React.useState(false);
   const [logsError, setLogsError] = React.useState<string | null>(null);
 
+  // Forge pipeline: the feature's progress/failure note written by the
+  // engine's `note` events. Fetched from GET /api/features/:id/note and
+  // rendered read-only in a collapsed <details> block. Null = no note.
+  const [note, setNote] = React.useState<string | null>(null);
+
   /**
    * Feature #79: screenshot-gallery lightbox.
    *
@@ -245,8 +320,23 @@ export function FeatureDetailDialog({
       }
     }
 
+    async function loadNote(id: number) {
+      try {
+        const res = await fetch(`/api/features/${id}/note`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { content?: string | null };
+        if (!cancelled) setNote(data.content ?? null);
+      } catch {
+        // Notes are best-effort; missing note just hides the section.
+      }
+    }
+
     load(featureId);
     loadLogs(featureId);
+    setNote(null);
+    loadNote(featureId);
     return () => {
       cancelled = true;
     };
@@ -305,6 +395,52 @@ export function FeatureDetailDialog({
       .map((id) => allFeatures.find((f) => f.id === id))
       .filter((f): f is DetailFeature => Boolean(f));
   }, [deps, allFeatures]);
+
+  /**
+   * Forge pipeline: the step rollup for this feature. Comes from the kanban's
+   * feature list payload (GET /api/projects/:id/features includes `steps` per
+   * feature) via the `allFeatures` prop — no extra fetch needed.
+   */
+  const stepsData = React.useMemo(() => {
+    if (featureId == null) return null;
+    const fromList = allFeatures.find((f) => f.id === featureId)?.steps;
+    return fromList && fromList.total > 0 ? fromList : null;
+  }, [allFeatures, featureId]);
+
+  /**
+   * Verification chips derived from log rows whose `meta` column parses to a
+   * `{type:"verification"}` payload (typecheck/lint/build/smoke/spec results
+   * persisted by the orchestrator). Chronological, one chip per run.
+   */
+  const verifications = React.useMemo<VerificationChip[]>(() => {
+    const out: VerificationChip[] = [];
+    for (const log of logs) {
+      if (!log.meta) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(log.meta);
+      } catch {
+        continue;
+      }
+      if (typeof parsed !== "object" || parsed === null) continue;
+      const p = parsed as {
+        type?: unknown;
+        kind?: unknown;
+        ok?: unknown;
+        errorCount?: unknown;
+        summary?: unknown;
+      };
+      if (p.type !== "verification" || typeof p.kind !== "string") continue;
+      out.push({
+        logId: log.id,
+        kind: p.kind,
+        ok: p.ok === true,
+        errorCount: typeof p.errorCount === "number" ? p.errorCount : 0,
+        summary: typeof p.summary === "string" ? p.summary : "",
+      });
+    }
+    return out;
+  }, [logs]);
 
   /**
    * Feature #79: derive the ordered screenshot list from the log stream.
@@ -775,6 +911,141 @@ export function FeatureDetailDialog({
                     </div>
                   )}
                 </div>
+
+                {/* Forge pipeline: ordered step list with status, attempts,
+                    and inline last error; verification chips parsed from log
+                    meta; the engine's progress note (collapsed); and the
+                    retry counter. Only rendered once the PLAN pass has
+                    decomposed the feature into steps. */}
+                {stepsData && (
+                  <div
+                    className="space-y-2"
+                    data-testid="feature-detail-pipeline-section"
+                  >
+                    <label className="flex items-center gap-1 text-sm font-medium text-foreground">
+                      <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
+                      Pipeline
+                      <span
+                        data-testid="feature-detail-pipeline-progress"
+                        className="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-normal tabular-nums text-muted-foreground"
+                      >
+                        {stepsData.passed}/{stepsData.total} steps
+                      </span>
+                    </label>
+                    <ol
+                      data-testid="feature-detail-steps-list"
+                      className="space-y-1.5"
+                    >
+                      {stepsData.items.map((s) => (
+                        <li
+                          key={s.index}
+                          data-testid={`feature-detail-step-${s.index}`}
+                          data-step-status={s.status}
+                          className="rounded-md border border-border bg-muted/30 px-2 py-1.5"
+                        >
+                          <div className="flex items-start gap-2">
+                            <span className="mt-0.5">
+                              <StepStatusIcon status={s.status} />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
+                                  {s.index + 1}. {s.title}
+                                </span>
+                                {s.attempts > 1 && (
+                                  <span
+                                    data-testid={`feature-detail-step-attempts-${s.index}`}
+                                    title={`${s.attempts} attempts`}
+                                    className="shrink-0 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-amber-500"
+                                  >
+                                    ×{s.attempts}
+                                  </span>
+                                )}
+                                <span className="shrink-0 text-[10px] uppercase text-muted-foreground">
+                                  {s.status}
+                                </span>
+                              </div>
+                              {s.detail && (
+                                <details className="mt-0.5">
+                                  <summary className="cursor-pointer select-none text-[11px] text-muted-foreground hover:text-foreground">
+                                    Detail
+                                  </summary>
+                                  <p className="mt-0.5 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">
+                                    {s.detail}
+                                  </p>
+                                </details>
+                              )}
+                              {s.lastError && (
+                                <p
+                                  data-testid={`feature-detail-step-error-${s.index}`}
+                                  title={s.lastError}
+                                  className="mt-0.5 truncate text-[11px] text-destructive"
+                                >
+                                  {s.lastError}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+
+                    {verifications.length > 0 && (
+                      <div
+                        data-testid="feature-detail-verifications"
+                        className="flex flex-wrap gap-1.5"
+                      >
+                        {verifications.map((v) => (
+                          <span
+                            key={v.logId}
+                            data-testid={`feature-detail-verification-${v.logId}`}
+                            data-verification-kind={v.kind}
+                            data-verification-ok={v.ok ? "true" : "false"}
+                            title={v.summary || undefined}
+                            className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+                              v.ok
+                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                                : "border-destructive/40 bg-destructive/10 text-destructive"
+                            }`}
+                          >
+                            {v.kind} {v.ok ? "✓" : "✗"}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {note != null && (
+                      <details
+                        data-testid="feature-detail-note"
+                        className="rounded-md border border-border bg-muted/30 px-2 py-1.5"
+                      >
+                        <summary className="flex cursor-pointer select-none items-center gap-1 text-xs font-medium text-foreground">
+                          <StickyNote
+                            className="h-3.5 w-3.5"
+                            aria-hidden="true"
+                          />
+                          Notes
+                        </summary>
+                        <pre
+                          data-testid="feature-detail-note-content"
+                          className="mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+                        >
+                          {note}
+                        </pre>
+                      </details>
+                    )}
+
+                    {(feature.attemptCount ?? 0) > 0 && (
+                      <p
+                        data-testid="feature-detail-attempt-count"
+                        data-attempt-count={feature.attemptCount}
+                        className="text-xs text-muted-foreground"
+                      >
+                        Attempt {feature.attemptCount}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Feature #79: screenshot gallery. Renders a thumbnail grid
                     of every screenshot captured during agent runs. Clicking a

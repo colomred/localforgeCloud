@@ -27,6 +27,8 @@ import { SearchIcon } from "@/components/forge/icons";
 import {
   FeatureNumbersProvider,
   type FeatureCardData,
+  type FeatureStepDisplayStatus,
+  type FeatureStepsSummary,
 } from "@/components/kanban/feature-card";
 import { AddFeatureDialog } from "@/components/kanban/add-feature-dialog";
 import { FeatureDetailDialog } from "@/components/kanban/feature-detail-dialog";
@@ -97,6 +99,42 @@ function resolveColumnFromOver(
   return found ? found.status : null;
 }
 
+const STEP_STATUSES: readonly FeatureStepDisplayStatus[] = [
+  "planned",
+  "running",
+  "verifying",
+  "fixing",
+  "passed",
+  "failed",
+  "skipped",
+];
+
+function isStepDisplayStatus(s: unknown): s is FeatureStepDisplayStatus {
+  return (
+    typeof s === "string" &&
+    (STEP_STATUSES as readonly string[]).includes(s)
+  );
+}
+
+/** Dot colour per step status, using the warm-workshop CSS variables. */
+function forgeStepDotColor(status: FeatureStepDisplayStatus): string {
+  switch (status) {
+    case "running":
+      return "var(--accent)";
+    case "verifying":
+    case "fixing":
+      return "var(--warn)";
+    case "passed":
+      return "var(--good)";
+    case "failed":
+      return "var(--bad)";
+    case "skipped":
+    case "planned":
+    default:
+      return "var(--line-2)";
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  ForgeCard - a single card styled with the warm workshop classes     */
 /* ------------------------------------------------------------------ */
@@ -115,6 +153,11 @@ function ForgeCard({
   onClick?: () => void;
 }) {
   const tr = feature.testResult ?? null;
+  // Forge pipeline: slim progress bar + per-step status dots (same testid
+  // convention as the feat96 badge so specs can assert on
+  // feature-card-steps-<id> / feature-card-step-<id>-<index>).
+  const steps = feature.steps ?? null;
+  const hasSteps = steps != null && steps.total > 0;
 
   return (
     <div
@@ -142,6 +185,71 @@ function ForgeCard({
       }
     >
       <div className="card-title">{feature.title}</div>
+      {hasSteps && steps && (
+        <div
+          data-testid={`feature-card-steps-${feature.id}`}
+          data-steps-total={steps.total}
+          data-steps-passed={steps.passed}
+          style={{
+            margin: "6px 0 2px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div
+              aria-hidden="true"
+              style={{
+                flex: 1,
+                height: 3,
+                borderRadius: 2,
+                background: "var(--line)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  borderRadius: 2,
+                  background: "var(--good)",
+                  width: `${Math.round((steps.passed / steps.total) * 100)}%`,
+                  transition: "width 300ms ease",
+                }}
+              />
+            </div>
+            <span
+              title={`${steps.passed} of ${steps.total} steps passed`}
+              style={{
+                fontSize: 10,
+                color: "var(--ink-3)",
+                whiteSpace: "nowrap",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {steps.passed}/{steps.total} steps
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+            {steps.items.map((s) => (
+              <span
+                key={s.index}
+                data-testid={`feature-card-step-${feature.id}-${s.index}`}
+                data-step-status={s.status}
+                title={`Step ${s.index + 1}: ${s.title} (${s.status})`}
+                className={s.status === "running" ? "animate-pulse" : undefined}
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  display: "inline-block",
+                  background: forgeStepDotColor(s.status),
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
       <div className="card-meta">
         <span className="tag">
           #{featureNumber ?? feature.id}
@@ -406,6 +514,129 @@ export function ForgeKanban({
     return () => {
       window.removeEventListener("kanban:refresh", onRefresh);
       window.removeEventListener("orchestrator:changed", onRefresh);
+    };
+  }, [load]);
+
+  /**
+   * Live step updates from the forge pipeline. The project view forwards the
+   * global SSE stream's `plan`/`step` events as `kanban:plan` / `kanban:step`
+   * CustomEvents (same convention as `kanban:refresh`); we patch the affected
+   * card's `steps` rollup in place so dots/progress update without refetching
+   * the whole board. Events for features not on this board are ignored.
+   */
+  React.useEffect(() => {
+    const onPlan = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | {
+            featureId?: number;
+            steps?: Array<{ index: number; title: string; detail?: string }>;
+          }
+        | undefined;
+      if (
+        !detail ||
+        typeof detail.featureId !== "number" ||
+        !Array.isArray(detail.steps)
+      ) {
+        return;
+      }
+      const planned = detail.steps;
+      setState((prev) => {
+        if (prev.kind !== "ready") return prev;
+        const idx = prev.features.findIndex((f) => f.id === detail.featureId);
+        if (idx < 0) return prev;
+        const prevSteps = prev.features[idx].steps ?? null;
+        // Mirror the server's replaceStepsForFeature: a re-plan keeps the
+        // status/attempts of steps whose index survives (passed stays passed).
+        const items = planned.map((s) => {
+          const existing = prevSteps?.items.find((p) => p.index === s.index);
+          return {
+            index: s.index,
+            title: s.title,
+            status: existing?.status ?? ("planned" as const),
+            attempts: existing?.attempts ?? 0,
+            detail: s.detail ?? existing?.detail ?? null,
+            lastError: existing?.lastError ?? null,
+          };
+        });
+        const nextSteps: FeatureStepsSummary = {
+          total: items.length,
+          passed: items.filter((i) => i.status === "passed").length,
+          items,
+        };
+        const features = [...prev.features];
+        features[idx] = { ...features[idx], steps: nextSteps };
+        return { kind: "ready", features };
+      });
+    };
+
+    const onStep = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | {
+            featureId?: number;
+            stepIndex?: number;
+            status?: string;
+            attempt?: number;
+            error?: string;
+          }
+        | undefined;
+      if (
+        !detail ||
+        typeof detail.featureId !== "number" ||
+        typeof detail.stepIndex !== "number" ||
+        !isStepDisplayStatus(detail.status)
+      ) {
+        return;
+      }
+      const status = detail.status;
+      // Fallback decision from the ref (not inside the updater — React may
+      // run updaters lazily): if this board has the feature but no matching
+      // step row yet (board loaded mid-run before the plan event), refetch.
+      const current = stateRef.current;
+      if (current.kind !== "ready") return;
+      const knownFeature = current.features.find(
+        (f) => f.id === detail.featureId,
+      );
+      if (!knownFeature) return;
+      if (
+        !knownFeature.steps?.items.some((i) => i.index === detail.stepIndex)
+      ) {
+        void load();
+        return;
+      }
+      setState((prev) => {
+        if (prev.kind !== "ready") return prev;
+        const idx = prev.features.findIndex((f) => f.id === detail.featureId);
+        if (idx < 0) return prev;
+        const prevSteps = prev.features[idx].steps ?? null;
+        const itemIdx =
+          prevSteps?.items.findIndex((i) => i.index === detail.stepIndex) ?? -1;
+        if (!prevSteps || itemIdx < 0) return prev;
+        const items = [...prevSteps.items];
+        items[itemIdx] = {
+          ...items[itemIdx],
+          status,
+          attempts:
+            typeof detail.attempt === "number"
+              ? detail.attempt
+              : items[itemIdx].attempts,
+          lastError: detail.error ?? null,
+        };
+        const nextSteps: FeatureStepsSummary = {
+          total: items.length,
+          passed: items.filter((i) => i.status === "passed").length,
+          items,
+        };
+        const features = [...prev.features];
+        features[idx] = { ...features[idx], steps: nextSteps };
+        return { kind: "ready", features };
+      });
+    };
+
+    window.addEventListener("kanban:plan", onPlan);
+    window.addEventListener("kanban:step", onStep);
+    return () => {
+      window.removeEventListener("kanban:plan", onPlan);
+      window.removeEventListener("kanban:step", onStep);
     };
   }, [load]);
 

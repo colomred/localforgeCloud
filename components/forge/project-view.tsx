@@ -6,6 +6,7 @@ import {
   AgentPods,
   type AgentPodData,
   type LogLine,
+  type PipelineState,
 } from "@/components/forge/agent-pods";
 import { AgentLogModal } from "@/components/forge/modals";
 import { ForgeKanban } from "@/components/forge/forge-kanban";
@@ -47,6 +48,41 @@ type FeatureCountsResponse = {
   features?: Array<{ status: string }>;
 };
 
+/**
+ * Internal per-session pipeline tracking. Extends the PipelineState the pods
+ * consume with bookkeeping fields (plan step titles for the status line,
+ * passed-step indices so retries don't double-count passedSteps).
+ */
+type PipelineTracking = PipelineState & {
+  stepTitles?: Record<number, string>;
+  passedIndices?: number[];
+};
+
+type PhaseEventData = {
+  sessionId: number;
+  phase: string;
+  stepIndex?: number;
+  stepCount?: number;
+};
+
+type StepEventData = {
+  sessionId: number;
+  stepIndex: number;
+  status: string;
+};
+
+type PlanEventData = {
+  sessionId: number;
+  steps: Array<{ index: number; title: string }>;
+};
+
+type BudgetEventData = {
+  sessionId: number;
+  usedTokens: number;
+  limitTokens: number;
+  handoff: boolean;
+};
+
 function makeEmptySlots(count: number): AgentPodData[] {
   return Array.from({ length: count }, (_, i) => ({
     slotIndex: i,
@@ -77,6 +113,12 @@ export function ProjectView({ project }: ProjectViewProps) {
     null,
   );
   const [logModalOpen, setLogModalOpen] = React.useState(false);
+  // Per-session pipeline state accumulated from phase/step/plan/budget SSE
+  // events. Merged into the pod data at render time (keyed by sessionId) and
+  // dropped when the session reaches a terminal status.
+  const [pipelineMap, setPipelineMap] = React.useState<
+    Record<number, PipelineTracking>
+  >({});
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [devServerRunning, setDevServerRunning] = React.useState(false);
   const [devServerPort, setDevServerPort] = React.useState<string | null>(null);
@@ -354,7 +396,121 @@ export function ProjectView({ project }: ProjectViewProps) {
         }
       });
 
-      es.addEventListener("status", () => {
+      es.addEventListener("plan", (e) => {
+        try {
+          const data = JSON.parse(e.data) as PlanEventData;
+          // Forward to the kanban (mirrors the kanban:refresh convention) so
+          // ForgeKanban can patch the affected card's step checklist in place.
+          window.dispatchEvent(
+            new CustomEvent("kanban:plan", { detail: data }),
+          );
+          setPipelineMap((prev) => ({
+            ...prev,
+            [data.sessionId]: {
+              ...prev[data.sessionId],
+              stepCount: data.steps.length,
+              stepTitles: Object.fromEntries(
+                data.steps.map((s) => [s.index, s.title]),
+              ),
+              passedIndices: [],
+              passedSteps: 0,
+            },
+          }));
+        } catch {
+          /* ignore */
+        }
+      });
+
+      es.addEventListener("phase", (e) => {
+        try {
+          const data = JSON.parse(e.data) as PhaseEventData;
+          setPipelineMap((prev) => {
+            const cur = prev[data.sessionId] ?? {};
+            return {
+              ...prev,
+              [data.sessionId]: {
+                ...cur,
+                phase: data.phase,
+                stepIndex: data.stepIndex,
+                stepCount: data.stepCount ?? cur.stepCount,
+                stepTitle:
+                  data.stepIndex != null
+                    ? cur.stepTitles?.[data.stepIndex]
+                    : undefined,
+              },
+            };
+          });
+        } catch {
+          /* ignore */
+        }
+      });
+
+      es.addEventListener("step", (e) => {
+        try {
+          const data = JSON.parse(e.data) as StepEventData;
+          // Forward every step transition to the kanban so card dots update
+          // live (the pod map below only cares about "passed").
+          window.dispatchEvent(
+            new CustomEvent("kanban:step", { detail: data }),
+          );
+          if (data.status !== "passed") return;
+          setPipelineMap((prev) => {
+            const cur = prev[data.sessionId] ?? {};
+            const passed = new Set(cur.passedIndices ?? []);
+            passed.add(data.stepIndex);
+            return {
+              ...prev,
+              [data.sessionId]: {
+                ...cur,
+                passedIndices: [...passed],
+                passedSteps: passed.size,
+              },
+            };
+          });
+        } catch {
+          /* ignore */
+        }
+      });
+
+      es.addEventListener("budget", (e) => {
+        try {
+          const data = JSON.parse(e.data) as BudgetEventData;
+          setPipelineMap((prev) => ({
+            ...prev,
+            [data.sessionId]: {
+              ...prev[data.sessionId],
+              budget: {
+                usedTokens: data.usedTokens,
+                limitTokens: data.limitTokens,
+                handoff: data.handoff,
+              },
+            },
+          }));
+        } catch {
+          /* ignore */
+        }
+      });
+
+      es.addEventListener("status", (e) => {
+        // Drop pipeline state for sessions that reached a terminal status so
+        // the map doesn't grow unbounded across auto-continued sessions.
+        try {
+          const data = JSON.parse(e.data) as {
+            sessionId?: number;
+            sessionStatus?: string;
+          };
+          const sid = data.sessionId;
+          if (sid != null && data.sessionStatus !== "in_progress") {
+            setPipelineMap((prev) => {
+              if (!(sid in prev)) return prev;
+              const next = { ...prev };
+              delete next[sid];
+              return next;
+            });
+          }
+        } catch {
+          /* ignore */
+        }
         // Refresh on status changes
         fetchSlots();
         fetchFeatureCounts();
@@ -401,6 +557,19 @@ export function ProjectView({ project }: ProjectViewProps) {
         .catch(() => {});
     },
     [projectId, fetchSlots],
+  );
+
+  // Merge the live pipeline state into the pod data at render time so the
+  // pods always see the freshest phase/step/budget snapshot for the session
+  // they're currently hosting.
+  const slotsWithPipeline = React.useMemo<AgentPodData[]>(
+    () =>
+      agentSlots.map((slot) =>
+        slot.sessionId != null && pipelineMap[slot.sessionId]
+          ? { ...slot, pipeline: pipelineMap[slot.sessionId] }
+          : slot,
+      ),
+    [agentSlots, pipelineMap],
   );
 
   const handleExpandAgent = React.useCallback(
@@ -524,7 +693,7 @@ export function ProjectView({ project }: ProjectViewProps) {
       {/* Agent Pods */}
       <AgentPods
         projectId={projectId}
-        slots={agentSlots}
+        slots={slotsWithPipeline}
         maxConcurrentAgents={maxConcurrentAgents}
         onStartAgent={handleStartAgent}
         onStopAgent={handleStopAgent}
