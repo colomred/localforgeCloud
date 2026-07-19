@@ -144,13 +144,50 @@ export function getLatestTestResultsForFeatures(
   for (const row of rows) {
     if (row.featureId == null) continue;
     if (map.has(row.featureId)) continue;
-    const parsed = parseTestResultMessage(row.message);
+    const parsed =
+      parseVerificationMeta(row.meta, row.message) ??
+      parseTestResultMessage(row.message);
     if (parsed) {
       parsed.createdAt = row.createdAt;
       map.set(row.featureId, parsed);
     }
   }
   return map;
+}
+
+/**
+ * Map a forge `verification` event (stored as JSON in agent_logs.meta) onto
+ * the FeatureTestResult badge shape. Spec runs carry real pass/fail counts
+ * in their summary; other kinds (smoke/build/typecheck/lint) collapse to a
+ * single pass-or-fail check.
+ */
+function parseVerificationMeta(
+  meta: string | null,
+  message: string,
+): FeatureTestResult | null {
+  if (!meta) return null;
+  let event: { type?: string; kind?: string; ok?: boolean; errorCount?: number };
+  try {
+    event = JSON.parse(meta);
+  } catch {
+    return null;
+  }
+  if (event.type !== "verification" || typeof event.ok !== "boolean") {
+    return null;
+  }
+  // Spec summaries look like "spec run: 2 passed, 1 failed" — reuse the
+  // count parser so the badge shows real numbers when it can.
+  const counted = parseTestResultMessage(message);
+  if (counted && counted.total > 0) return counted;
+  return {
+    passed: event.ok ? 1 : 0,
+    failed: event.ok ? 0 : Math.max(1, event.errorCount ?? 1),
+    total: event.ok ? 1 : Math.max(1, event.errorCount ?? 1),
+    ok: event.ok,
+    durationMs: null,
+    rawMessage: message,
+    createdAt: "",
+  };
 }
 
 /**

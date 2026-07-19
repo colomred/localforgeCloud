@@ -10,8 +10,6 @@ import {
   agentSessions,
   agentLogs,
 } from "./db/schema";
-import { createPiLocalModel } from "./agent/pi-model-config";
-import { getEffectiveProviderConfig } from "./settings";
 
 /**
  * Project domain helpers.
@@ -26,9 +24,6 @@ import { getEffectiveProviderConfig } from "./settings";
  *   without touching the project code.
  * - Folder paths are slugified from the project name to keep them filesystem-
  *   safe. Collisions get a numeric suffix.
- * - We always generate a `.pi/models.json` inside the project folder so Pi
- *   can also be used directly from that folder with the same local model
- *   configuration LocalForge passes to its in-process runtime.
  */
 
 const DEFAULT_WORKING_DIR = path.join(process.cwd(), "projects");
@@ -107,53 +102,6 @@ function pickUniqueFolder(base: string, slug: string): string {
   return candidate;
 }
 
-function writePiSettingsFile(
-  folderPath: string,
-  config: ReturnType<typeof getEffectiveProviderConfig>,
-): void {
-  const piDir = path.join(folderPath, ".pi");
-  fs.mkdirSync(piDir, { recursive: true });
-  const localModel = createPiLocalModel(config);
-  const modelsContent = {
-    providers: {
-      [localModel.provider]: {
-        baseUrl: localModel.baseUrl,
-        api: localModel.api,
-        apiKey: "localforge",
-        compat: localModel.compat,
-        models: [
-          {
-            id: localModel.id,
-            name: localModel.name,
-            reasoning: localModel.reasoning,
-            input: localModel.input,
-            contextWindow: localModel.contextWindow,
-            maxTokens: localModel.maxTokens,
-            cost: localModel.cost,
-          },
-        ],
-      },
-    },
-  };
-  fs.writeFileSync(
-    path.join(piDir, "models.json"),
-    JSON.stringify(modelsContent, null, 2),
-    "utf8",
-  );
-}
-
-/**
- * Regenerate `.pi/models.json` for an existing project using its effective
- * settings (project overrides take precedence over globals). Called by the
- * project-settings API after a save so the on-disk file stays in sync with
- * the database.
- *
- * Idempotent: always writes the full JSON object from scratch.
- */
-export function writeProjectPiSettings(project: ProjectRecord): void {
-  writePiSettingsFile(project.folderPath, getEffectiveProviderConfig(project.id));
-}
-
 export function listProjects(): ProjectRecord[] {
   return db.select().from(projects).all();
 }
@@ -226,8 +174,6 @@ export function createProject(input: CreateProjectInput): ProjectRecord {
   fs.mkdirSync(folderPath, { recursive: true });
 
   try {
-    writePiSettingsFile(folderPath, getEffectiveProviderConfig(null));
-
     const inserted = db
       .insert(projects)
       .values({

@@ -6,9 +6,9 @@
 //   1. Create a test project + feature via the REST API
 //   2. POST /api/projects/:id/orchestrator  action=start, durationMs=30000
 //      so the runner sleeps long enough for us to observe it running
-//   3. Count agent-runner.mjs child processes (should be >=1)
+//   3. Count engine-runner child processes (should be >=1)
 //   4. POST /api/projects/:id/orchestrator  action=stop
-//   5. Poll until agent-runner.mjs count drops to zero (SIGTERM fires, runner
+//   5. Poll until engine-runner count drops to zero (SIGTERM fires, runner
 //      emits a final log, then exits with code 130 within ~500 ms)
 //   6. Verify DB: session.status='terminated', ended_at set, feature back
 //      in backlog
@@ -59,7 +59,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Count node.exe processes whose command line includes "agent-runner.mjs".
+// Count node.exe processes whose command line includes "engine-runner".
 // Uses tasklist on Windows (always present) or ps on POSIX. Returns the
 // count; we only care whether it's zero vs non-zero.
 function countRunners() {
@@ -71,7 +71,7 @@ function countRunners() {
       );
       let total = 0;
       for (const line of out.split(/\r?\n/)) {
-        if (line.includes("agent-runner") || line.includes("node.exe")) {
+        if (line.includes("engine-runner") || line.includes("node.exe")) {
           // The tasklist /V variant does NOT include command line, only
           // window title. So we need a different method — use WMIC CommandLine.
           total += 0;
@@ -96,12 +96,12 @@ function countRunners() {
       }
       let count = 0;
       for (const line of out2.split(/\r?\n/)) {
-        if (line.includes("agent-runner.mjs")) count += 1;
+        if (line.includes("engine-runner")) count += 1;
       }
       return count;
     } else {
       const out = execSync("ps -eo args", { encoding: "utf8" });
-      return out.split("\n").filter((l) => l.includes("agent-runner.mjs")).length;
+      return out.split("\n").filter((l) => l.includes("engine-runner")).length;
     }
   } catch (err) {
     console.error("process list failed:", err.message);

@@ -30,19 +30,15 @@ export const GLOBAL_SETTING_KEYS = [
   "coder_prompt",
   "dev_server_port",
   "max_concurrent_agents",
-  "playwright_enabled",
-  "playwright_headed",
   "context_window",
   "project_template",
   "spec_generation",
-  "engine",
 ] as const;
 
 /**
  * Keys that can be overridden on a per-project basis. `working_directory`
  * is global-only because it controls where new project folders get created
- * on disk — overriding it per-project would be paradoxical. `engine` is
- * global-only because it is a migration flag for the execution core.
+ * on disk — overriding it per-project would be paradoxical.
  */
 export const PROJECT_SETTING_KEYS = [
   "provider",
@@ -52,8 +48,6 @@ export const PROJECT_SETTING_KEYS = [
   "coder_prompt",
   "dev_server_port",
   "max_concurrent_agents",
-  "playwright_enabled",
-  "playwright_headed",
   "context_window",
   "project_template",
   "spec_generation",
@@ -71,15 +65,6 @@ export const DEFAULT_GLOBAL_SETTINGS: Record<GlobalSettingKey, string> = {
   coder_prompt: "",
   dev_server_port: "3000",
   max_concurrent_agents: "1",
-  // Playwright verification is opt-in. Many small local models struggle to
-  // drive a real browser well enough to take meaningful screenshots, so the
-  // default is off — the coding agent's own success signal is treated as
-  // sufficient unless the user explicitly enables verification.
-  playwright_enabled: "false",
-  // When verification runs, launch a visible Chromium window (headed) instead
-  // of headless. Ignored when playwright_enabled is false. Forced headless when
-  // CI is set in the agent runner. Default off for speed and unattended runs.
-  playwright_headed: "false",
   // Fallback context window (tokens) when the provider does not report the
   // loaded model's real context length. Deliberately conservative: small
   // local models are routinely loaded at 8k. The engine detects the real
@@ -92,10 +77,6 @@ export const DEFAULT_GLOBAL_SETTINGS: Record<GlobalSettingKey, string> = {
   // to each feature; the harness executes the spec and reports the result
   // as a non-fatal badge. The model never drives a browser interactively.
   spec_generation: "false",
-  // Execution engine migration flag: "forge" (the bespoke small-model
-  // engine, default) or "pi" (legacy agent-runner). Removed once the
-  // migration completes.
-  engine: "forge",
 };
 
 export const MAX_CONCURRENT_AGENTS_HARD_CAP = 3;
@@ -108,18 +89,15 @@ function validateMaxConcurrentAgents(raw: string): string | null {
   return null;
 }
 
-function validatePlaywrightEnabled(raw: string): string | null {
+function validateBooleanSetting(label: string, raw: string): string | null {
   if (raw !== "true" && raw !== "false") {
-    return "Playwright enabled must be 'true' or 'false'";
+    return `${label} must be 'true' or 'false'`;
   }
   return null;
 }
 
 export const PROJECT_TEMPLATES = ["next-app", "vite-react", "none"] as const;
 export type ProjectTemplate = (typeof PROJECT_TEMPLATES)[number];
-
-export const ENGINE_IDS = ["pi", "forge"] as const;
-export type EngineId = (typeof ENGINE_IDS)[number];
 
 function validateContextWindow(raw: string): string | null {
   const n = Number.parseInt(raw, 10);
@@ -136,22 +114,6 @@ function validateProjectTemplate(raw: string): string | null {
   return null;
 }
 
-function validateEngine(raw: string): string | null {
-  if (!(ENGINE_IDS as readonly string[]).includes(raw)) {
-    return `Engine must be one of: ${ENGINE_IDS.join(", ")}`;
-  }
-  return null;
-}
-
-/**
- * Cast the raw playwright_enabled string ("true"/"false") into a boolean.
- * Anything other than the literal string "true" is treated as disabled,
- * matching the default-off policy.
- */
-export function isPlaywrightEnabled(raw: string | null | undefined): boolean {
-  return raw === "true";
-}
-
 /** Whether Tier-3 spec generation is enabled ("true"/"false" string cast). */
 export function isSpecGenerationEnabled(raw: string | null | undefined): boolean {
   return raw === "true";
@@ -165,13 +127,6 @@ export function parseContextWindow(raw: string | null | undefined): number {
   const n = Number.parseInt(raw ?? "", 10);
   if (Number.isFinite(n) && n >= 1024) return n;
   return Number.parseInt(DEFAULT_GLOBAL_SETTINGS.context_window, 10);
-}
-
-/**
- * When Playwright verification is on, whether to use a visible browser window.
- */
-export function isPlaywrightHeaded(raw: string | null | undefined): boolean {
-  return raw === "true";
 }
 
 function readGlobal(key: GlobalSettingKey): string | null {
@@ -248,16 +203,6 @@ function validate(input: UpdateGlobalSettingsInput): string | null {
     const err = validateMaxConcurrentAgents(input.max_concurrent_agents);
     if (err) return err;
   }
-  if (input.playwright_enabled !== undefined) {
-    const err = validatePlaywrightEnabled(input.playwright_enabled);
-    if (err) return err;
-  }
-  if (input.playwright_headed !== undefined) {
-    const err = validatePlaywrightEnabled(input.playwright_headed);
-    if (err) {
-      return err.replace("Playwright enabled", "Playwright headed");
-    }
-  }
   if (input.context_window !== undefined) {
     const err = validateContextWindow(input.context_window);
     if (err) return err;
@@ -267,13 +212,7 @@ function validate(input: UpdateGlobalSettingsInput): string | null {
     if (err) return err;
   }
   if (input.spec_generation !== undefined) {
-    const err = validatePlaywrightEnabled(input.spec_generation);
-    if (err) {
-      return err.replace("Playwright enabled", "Spec generation");
-    }
-  }
-  if (input.engine !== undefined) {
-    const err = validateEngine(input.engine);
+    const err = validateBooleanSetting("Spec generation", input.spec_generation);
     if (err) return err;
   }
   return null;
@@ -403,16 +342,6 @@ function validateProjectInput(input: UpdateProjectSettingsInput): string | null 
     const err = validateMaxConcurrentAgents(input.max_concurrent_agents);
     if (err) return err;
   }
-  if (input.playwright_enabled) {
-    const err = validatePlaywrightEnabled(input.playwright_enabled);
-    if (err) return err;
-  }
-  if (input.playwright_headed) {
-    const err = validatePlaywrightEnabled(input.playwright_headed);
-    if (err) {
-      return err.replace("Playwright enabled", "Playwright headed");
-    }
-  }
   if (input.context_window) {
     const err = validateContextWindow(input.context_window);
     if (err) return err;
@@ -422,10 +351,8 @@ function validateProjectInput(input: UpdateProjectSettingsInput): string | null 
     if (err) return err;
   }
   if (input.spec_generation) {
-    const err = validatePlaywrightEnabled(input.spec_generation);
-    if (err) {
-      return err.replace("Playwright enabled", "Spec generation");
-    }
+    const err = validateBooleanSetting("Spec generation", input.spec_generation);
+    if (err) return err;
   }
   // model accepts any non-empty string, or empty/null to clear.
   return null;

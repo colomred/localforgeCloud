@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getProject, writeProjectPiSettings } from "@/lib/projects";
+import { getProject } from "@/lib/projects";
 import {
   getGlobalSettings,
   getProjectEffectiveSettings,
@@ -54,8 +54,9 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
       coder_prompt: globals.coder_prompt,
       dev_server_port: globals.dev_server_port,
       max_concurrent_agents: globals.max_concurrent_agents,
-      playwright_enabled: globals.playwright_enabled,
-      playwright_headed: globals.playwright_headed,
+      context_window: globals.context_window,
+      project_template: globals.project_template,
+      spec_generation: globals.spec_generation,
     },
   });
 }
@@ -72,9 +73,6 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
  *   - Non-empty string sets the override for that key.
  *   - Empty string or explicit null clears the override (falls back to global).
  *   - Omitting the key leaves the existing override unchanged.
- *
- * After persisting overrides to SQLite, the project's on-disk `.pi/models.json`
- * is regenerated so Pi can use the new values on its next run.
  */
 export async function PUT(req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -99,10 +97,6 @@ export async function PUT(req: NextRequest, ctx: RouteContext) {
       projectId,
       (body ?? {}) as UpdateProjectSettingsInput,
     );
-    // Keep the on-disk .pi/models.json in sync with the DB so the agent
-    // session sees the most recent config on its next spawn.
-    writeProjectPiSettings(project);
-
     const effective = getProjectEffectiveSettings(projectId);
     return NextResponse.json({ overrides, effective });
   } catch (err) {

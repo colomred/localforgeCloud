@@ -50,11 +50,9 @@ import {
 } from "../projects";
 import {
   getEffectiveProviderConfig,
-  getGlobalSettings,
   getProjectEffectiveSettings,
   MAX_CONCURRENT_AGENTS_HARD_CAP,
   parseContextWindow,
-  type EngineId,
 } from "../settings";
 import {
   parseRunnerLine,
@@ -66,7 +64,6 @@ import {
   type RunnerVerificationEvent,
 } from "../engine/events";
 import {
-  listStepsForFeature,
   resetStepsForRetry,
   updateStepStatus,
   replaceStepsForFeature,
@@ -87,14 +84,15 @@ import type { PipelineJob } from "../engine/pipeline";
 /**
  * Coding-agent orchestrator.
  *
- * Responsibilities (features #63, #67, #68):
+ * Responsibilities:
  *   1. Pick the highest-priority ready backlog feature for a project and
  *      transition it to `in_progress`.
- *   2. Spawn a Pi AgentSession runner as a detached Node.js child process
- *      (scripts/agent-runner.mjs) wired to the project's local-model config.
- *   3. Parse the runner's JSON-lines stdout into agent_log rows and broadcast
- *      them to any live SSE subscribers (Feature #71 uses this via
- *      `subscribe(sessionId, listener)`).
+ *   2. Spawn the forge engine runner (scripts/engine-runner.ts) as a child
+ *      process with a self-contained job file (provider config, steps to
+ *      resume, memory paths).
+ *   3. Parse the runner's JSON-lines RunnerEvents: persist steps + logs
+ *      (structured events into agent_logs.meta), write brief/note files,
+ *      and broadcast everything to live SSE subscribers.
  *   4. When the runner exits, transition the feature to `completed` on
  *      success or demote it back to the backlog with a lowered priority on
  *      failure. Close the agent_session row in either case.
@@ -182,12 +180,10 @@ type RunningSession = {
   stdoutBuffer: string;
   stderrBuffer: string;
   /**
-   * Absolute path to the JSON prompt/job file written for this run. The
-   * runner reads it on startup; the orchestrator cleans it up on close.
+   * Absolute path to the JSON job file written for this run. The runner
+   * reads it on startup; the orchestrator cleans it up on close.
    */
   promptFile: string;
-  /** Which execution engine this session runs on. */
-  engine: EngineId;
   /** Project folder — target for brief/note writes from runner events. */
   projectDir: string;
   /** Absolute watchdog — kills the runner past the hard session deadline. */
@@ -216,15 +212,10 @@ export function getMaxConcurrentAgentsForProject(projectId: number): number {
   return Math.max(1, Math.min(MAX_CONCURRENT_AGENTS_CAP, n));
 }
 
-const SESSION_TIMEOUT_MS = Number.parseInt(
-  process.env.LOCALFORGE_SESSION_TIMEOUT_MS ?? String(30 * 60 * 1000),
-  10,
-);
-
 /**
- * Forge-engine watchdogs. The pipeline emits events constantly (every tool
- * call, phase change, verification), so silence is the real hang signal —
- * the absolute cap is only a backstop for pathological runs.
+ * Watchdogs. The pipeline emits events constantly (every tool call, phase
+ * change, verification), so silence is the real hang signal — the absolute
+ * cap is only a backstop for pathological runs.
  */
 const FORGE_IDLE_TIMEOUT_MS = Number.parseInt(
   process.env.LOCALFORGE_IDLE_TIMEOUT_MS ?? String(10 * 60 * 1000),
@@ -234,11 +225,6 @@ const FORGE_SESSION_TIMEOUT_MS = Number.parseInt(
   process.env.LOCALFORGE_SESSION_TIMEOUT_MS ?? String(90 * 60 * 1000),
   10,
 );
-
-/** Resolve the active execution engine (global setting; migration flag). */
-function getActiveEngine(): EngineId {
-  return getGlobalSettings().engine === "forge" ? "forge" : "pi";
-}
 
 type OrchestratorState = {
   running: Map<number, RunningSession>; // keyed by session id
@@ -454,19 +440,11 @@ export function startOrchestrator(projectId: number): StartResult {
     featureStatus: "in_progress",
   });
 
-  const engine = getActiveEngine();
-  const { child, promptFile } =
-    engine === "forge"
-      ? spawnEngineRunner({
-          session,
-          feature: movedFeature,
-          project,
-        })
-      : spawnAgentRunner({
-          session,
-          feature: movedFeature,
-          projectDir: project.folderPath,
-        });
+  const { child, promptFile } = spawnEngineRunner({
+    session,
+    feature: movedFeature,
+    project,
+  });
 
   const rs: RunningSession = {
     session,
@@ -475,28 +453,25 @@ export function startOrchestrator(projectId: number): StartResult {
     stdoutBuffer: "",
     stderrBuffer: "",
     promptFile,
-    engine,
     projectDir: project.folderPath,
   };
   getState().running.set(session.id, rs);
 
   attachChildHandlers(rs);
 
-  // Absolute watchdog: kill the runner past the hard session deadline. The
-  // forge engine gets a longer cap (constant progress means silence, not
-  // duration, is its hang signal — see the idle watchdog below).
-  const absoluteTimeoutMs =
-    engine === "forge" ? FORGE_SESSION_TIMEOUT_MS : SESSION_TIMEOUT_MS;
-  if (absoluteTimeoutMs > 0) {
+  // Absolute watchdog: kill the runner past the hard session deadline.
+  // Silence, not duration, is the real hang signal (see the idle watchdog),
+  // so the cap is generous.
+  if (FORGE_SESSION_TIMEOUT_MS > 0) {
     rs.watchdog = setTimeout(() => {
       killForWatchdog(
         rs,
-        `Session watchdog: runner exceeded ${Math.round(absoluteTimeoutMs / 1000 / 60)}min timeout — killing`,
+        `Session watchdog: runner exceeded ${Math.round(FORGE_SESSION_TIMEOUT_MS / 1000 / 60)}min timeout — killing`,
       );
-    }, absoluteTimeoutMs);
+    }, FORGE_SESSION_TIMEOUT_MS);
     rs.watchdog.unref();
   }
-  if (engine === "forge" && FORGE_IDLE_TIMEOUT_MS > 0) {
+  if (FORGE_IDLE_TIMEOUT_MS > 0) {
     armIdleWatchdog(rs);
   }
 
@@ -600,102 +575,6 @@ function armIdleWatchdog(rs: RunningSession): void {
 }
 
 /* --------------------------- Child process ---------------------------- */
-
-function spawnAgentRunner(args: {
-  session: AgentSessionRecord;
-  feature: FeatureRecord;
-  projectDir: string;
-}): { child: ChildProcessWithoutNullStreams; promptFile: string } {
-  const runnerPath = path.join(process.cwd(), "scripts", "agent-runner.mjs");
-  const { baseUrl, model, provider } = getEffectiveProviderConfig(
-    args.session.projectId,
-  );
-  const effectiveSettings = getProjectEffectiveSettings(args.session.projectId);
-  const coderPrompt = effectiveSettings.coder_prompt || "";
-  const devServerPort = effectiveSettings.dev_server_port || "3000";
-  // Resolved per-project; the runner reads this env var to decide whether
-  // to skip the Playwright verification phase entirely. Default is "false".
-  const playwrightEnabled =
-    effectiveSettings.playwright_enabled === "true" ? "true" : "false";
-  const playwrightHeaded =
-    effectiveSettings.playwright_headed === "true" ? "true" : "false";
-
-  // Write the feature context to a temp JSON file so the runner can read
-  // long descriptions and acceptance criteria without argv escaping pain.
-  const promptFile = path.join(
-    os.tmpdir(),
-    `localforge-prompt-${args.session.id}.json`,
-  );
-  fs.writeFileSync(
-    promptFile,
-    JSON.stringify(
-      {
-        id: args.feature.id,
-        title: args.feature.title,
-        description: args.feature.description,
-        acceptanceCriteria: args.feature.acceptanceCriteria,
-        coderPrompt,
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
-
-  const argv = [
-    runnerPath,
-    "--session-id",
-    String(args.session.id),
-    "--feature-id",
-    String(args.feature.id),
-    "--feature-title",
-    args.feature.title,
-    "--prompt-file",
-    promptFile,
-    "--project-dir",
-    args.projectDir,
-    "--base-url",
-    baseUrl,
-    "--provider",
-    provider,
-    "--model",
-    model,
-  ];
-
-  debugLog("═══════════════════════ NEW SESSION ═══════════════════════");
-  debugLog("SPAWN_RUNNER", {
-    sessionId: args.session.id,
-    featureId: args.feature.id,
-    featureTitle: args.feature.title,
-    projectDir: args.projectDir,
-    baseUrl,
-    model,
-    provider,
-    runnerPath,
-    promptFile,
-    nodeExec: process.execPath,
-    sessionTimeoutMs: SESSION_TIMEOUT_MS,
-    playwrightEnabled,
-    playwrightHeaded,
-  });
-
-  const child = spawn(process.execPath, argv, {
-    cwd: args.projectDir,
-    env: {
-      ...process.env,
-      LOCALFORGE_SESSION_ID: String(args.session.id),
-      LOCALFORGE_FEATURE_ID: String(args.feature.id),
-      LOCALFORGE_DEV_SERVER_PORT: devServerPort,
-      LOCALFORGE_PLAYWRIGHT_BASE_URL: `http://localhost:${devServerPort}`,
-      LOCALFORGE_PLAYWRIGHT_ENABLED: playwrightEnabled,
-      LOCALFORGE_PLAYWRIGHT_HEADED: playwrightHeaded,
-    },
-    stdio: "pipe",
-  });
-
-  debugLog("SPAWN_RUNNER_PID", { pid: child.pid, sessionId: args.session.id });
-  return { child, promptFile };
-}
 
 /**
  * Spawn the forge engine runner (scripts/engine-runner.ts) for a feature.
@@ -930,7 +809,7 @@ function persistLog(
 }
 
 function handleRunnerLine(rs: RunningSession, raw: string): void {
-  if (rs.engine === "forge") armIdleWatchdog(rs);
+  armIdleWatchdog(rs);
 
   const event: RunnerEvent | null = parseRunnerLine(raw);
   if (!event) {
