@@ -6,7 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 /* ──────────────────── Debug file logger ──────────────────── */
-const DEBUG_LOG_PATH = path.join(process.cwd(), "agent-runner-debug.log");
+const DEBUG_LOG_PATH = path.join(process.cwd(), "forge-debug.log");
 
 function debugLog(label: string, data?: unknown): void {
   try {

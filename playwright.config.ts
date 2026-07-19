@@ -13,6 +13,11 @@ export default defineConfig({
     baseURL: process.env.BASE_URL || "http://localhost:7777",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // Environments with a system Chromium (CI images, sandboxes) can point
+    // at it instead of downloading a browser build.
+    launchOptions: process.env.LOCALFORGE_CHROMIUM_PATH
+      ? { executablePath: process.env.LOCALFORGE_CHROMIUM_PATH }
+      : {},
   },
   projects: [
     {

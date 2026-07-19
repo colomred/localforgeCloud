@@ -28,6 +28,9 @@ export type VerificationOutcome = {
   summary: string;
   errors: ParsedError[];
   output: string;
+  /** Real test counts, set by spec runs. */
+  passed?: number;
+  failed?: number;
 };
 
 export const MAX_PARSED_ERRORS = 15;
@@ -387,5 +390,7 @@ export async function runSpecFile(
     summary: `spec run: ${passed} passed, ${failed} failed`,
     errors: [],
     output: clampToolOutput(result.output),
+    passed,
+    failed,
   };
 }

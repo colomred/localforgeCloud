@@ -13,8 +13,7 @@ import {
 } from "./tools";
 
 /**
- * The bespoke agent loop — the replacement for pi-coding-agent, built for
- * small local models. Design goals:
+ * The forge agent loop, built for small local models. Design goals:
  *
  *   - Total control of every token entering the window (clamped tool
  *     outputs, budget checks before each request, hard turn caps).

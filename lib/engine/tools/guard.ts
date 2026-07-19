@@ -2,9 +2,8 @@ import path from "node:path";
 
 /**
  * Workspace containment for tool paths. The system prompt states the rule;
- * this is the enforcement layer (ported from the legacy agent-runner's
- * workspace-guard extension, including MSYS path normalization so Git-Bash
- * style /c/Users/... paths resolve correctly on Windows).
+ * this is the enforcement layer (including MSYS path normalization so
+ * Git-Bash style /c/Users/... paths resolve correctly on Windows).
  */
 
 const isWindows = process.platform === "win32";

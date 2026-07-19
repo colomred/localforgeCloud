@@ -93,6 +93,9 @@ export type RunnerVerificationEvent = {
   ok: boolean;
   errorCount: number;
   summary: string;
+  /** Real test counts, present for spec runs. */
+  passed?: number;
+  failed?: number;
 };
 
 /** Context-budget snapshot for the active session. Drives the context meter. */

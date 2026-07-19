@@ -127,6 +127,8 @@ export async function runPipeline(
       ok: outcome.ok,
       errorCount: outcome.errorCount,
       summary: outcome.summary,
+      passed: outcome.passed,
+      failed: outcome.failed,
     });
 
   /* ------------------------- provider + budget setup ------------------- */

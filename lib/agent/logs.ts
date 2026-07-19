@@ -69,15 +69,10 @@ export function listAgentLogsForFeature(featureId: number): AgentLogRecord[] {
 }
 
 /**
- * Parsed Playwright test-result summary. The runner writes test_result log
- * rows with a message like:
- *   "npx playwright test completed: 1 passed, 0 failed (639ms)"
- * and older runs omit the failed/duration segments:
- *   "npx playwright test completed: 1 passed"
- *
- * Feature #96 surfaces the parsed counts on the kanban card so every feature
- * can advertise its most recent pass/fail badge without the user having to
- * open the detail modal.
+ * Verification badge for the kanban card, derived from the forge engine's
+ * `verification` events (persisted as JSON in `agent_logs.meta` on
+ * test_result rows). Spec runs carry real pass/fail counts; other kinds
+ * (smoke/build/typecheck/lint) collapse to a single pass-or-fail check.
  */
 export type FeatureTestResult = {
   passed: number;
@@ -88,31 +83,6 @@ export type FeatureTestResult = {
   rawMessage: string;
   createdAt: string;
 };
-
-const TEST_RESULT_PATTERN =
-  /(\d+)\s+passed(?:\s*,\s*(\d+)\s+failed)?(?:\s*\((\d+)\s*ms\))?/i;
-
-/** Parse a test_result log message into structured counts; null if not parseable. */
-export function parseTestResultMessage(raw: string): FeatureTestResult | null {
-  if (typeof raw !== "string") return null;
-  const match = TEST_RESULT_PATTERN.exec(raw);
-  if (!match) return null;
-  const passed = Number.parseInt(match[1] ?? "0", 10) || 0;
-  const failed = Number.parseInt(match[2] ?? "0", 10) || 0;
-  const durationMs =
-    match[3] != null ? Number.parseInt(match[3], 10) || 0 : null;
-  const total = passed + failed;
-  return {
-    passed,
-    failed,
-    total,
-    ok: failed === 0 && passed > 0,
-    durationMs,
-    rawMessage: raw,
-    // Caller fills createdAt — this helper only parses the message text.
-    createdAt: "",
-  };
-}
 
 /**
  * Fetch the most recent `test_result` log row for each of the supplied feature
@@ -144,9 +114,7 @@ export function getLatestTestResultsForFeatures(
   for (const row of rows) {
     if (row.featureId == null) continue;
     if (map.has(row.featureId)) continue;
-    const parsed =
-      parseVerificationMeta(row.meta, row.message) ??
-      parseTestResultMessage(row.message);
+    const parsed = parseVerificationMeta(row.meta, row.message);
     if (parsed) {
       parsed.createdAt = row.createdAt;
       map.set(row.featureId, parsed);
@@ -155,18 +123,20 @@ export function getLatestTestResultsForFeatures(
   return map;
 }
 
-/**
- * Map a forge `verification` event (stored as JSON in agent_logs.meta) onto
- * the FeatureTestResult badge shape. Spec runs carry real pass/fail counts
- * in their summary; other kinds (smoke/build/typecheck/lint) collapse to a
- * single pass-or-fail check.
- */
+/** Map a forge `verification` event onto the FeatureTestResult badge shape. */
 function parseVerificationMeta(
   meta: string | null,
   message: string,
 ): FeatureTestResult | null {
   if (!meta) return null;
-  let event: { type?: string; kind?: string; ok?: boolean; errorCount?: number };
+  let event: {
+    type?: string;
+    kind?: string;
+    ok?: boolean;
+    errorCount?: number;
+    passed?: number;
+    failed?: number;
+  };
   try {
     event = JSON.parse(meta);
   } catch {
@@ -175,14 +145,18 @@ function parseVerificationMeta(
   if (event.type !== "verification" || typeof event.ok !== "boolean") {
     return null;
   }
-  // Spec summaries look like "spec run: 2 passed, 1 failed" — reuse the
-  // count parser so the badge shows real numbers when it can.
-  const counted = parseTestResultMessage(message);
-  if (counted && counted.total > 0) return counted;
+  const hasCounts =
+    typeof event.passed === "number" && typeof event.failed === "number";
+  const passed = hasCounts ? event.passed! : event.ok ? 1 : 0;
+  const failed = hasCounts
+    ? event.failed!
+    : event.ok
+      ? 0
+      : Math.max(1, event.errorCount ?? 1);
   return {
-    passed: event.ok ? 1 : 0,
-    failed: event.ok ? 0 : Math.max(1, event.errorCount ?? 1),
-    total: event.ok ? 1 : Math.max(1, event.errorCount ?? 1),
+    passed,
+    failed,
+    total: passed + failed,
     ok: event.ok,
     durationMs: null,
     rawMessage: message,

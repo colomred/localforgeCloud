@@ -16,7 +16,7 @@ import {
  * recognise (tags include the quantisation suffix, e.g. `llama3.2:3b`).
  *
  * For outbound chat completions the OpenAI-compat endpoint at
- * `<base>/v1/chat/completions` is what the bootstrapper / agent-runner hit
+ * `<base>/v1/chat/completions` is what the bootstrapper and forge engine hit
  * — that path is shared with LM Studio, which is why we keep the chat
  * client provider-agnostic in `lib/agent/lm-studio.ts` and only branch on
  * provider for model listing + URL resolution.
