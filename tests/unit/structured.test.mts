@@ -55,10 +55,47 @@ describe("generateStructured", () => {
 
   it("returns a validated object from a json_schema-capable provider", async () => {
     server = await startMockLlmServer({
+      scenarios: { m: [{ json: { steps: [{ title: "step one" }] } }] },
+    });
+    const client = new ProviderClient({ baseUrl: server.baseUrl, model: "m" });
+    const result = await generateStructured({
+      client,
+      schema,
+      name: "plan",
+      messages: [{ role: "user", content: "plan it" }],
+    });
+    assert.equal(result.steps[0].title, "step one");
+    // json_schema is asked for first, and nothing is spent probing for it.
+    assert.equal(server.requests.length, 1);
+    const request = server.requests[0] as {
+      response_format?: { type: string; json_schema?: { name: string } };
+    };
+    assert.equal(request.response_format?.type, "json_schema");
+    assert.equal(request.response_format?.json_schema?.name, "plan");
+  });
+
+  it("recovers an answer delivered on the reasoning channel", async () => {
+    // Constrained decoding on a reasoning model puts the whole reply in
+    // reasoning_content and leaves content empty (LM Studio + qwen3).
+    server = await startMockLlmServer({
+      scenarios: { m: [{ reasoning: { steps: [{ title: "from reasoning" }] } }] },
+    });
+    const client = new ProviderClient({ baseUrl: server.baseUrl, model: "m" });
+    const result = await generateStructured({
+      client,
+      schema,
+      name: "plan",
+      messages: [{ role: "user", content: "plan it" }],
+    });
+    assert.equal(result.steps[0].title, "from reasoning");
+  });
+
+  it("steps down the ladder when the provider rejects json_schema", async () => {
+    server = await startMockLlmServer({
       scenarios: {
         m: [
-          { json: { ok: true } }, // capabilities probe
-          { json: { steps: [{ title: "step one" }] } },
+          { status: 400, error: "'response_format.type' must be 'json_object'" },
+          { json: { steps: [{ title: "downgraded" }] } },
         ],
       },
     });
@@ -69,14 +106,20 @@ describe("generateStructured", () => {
       name: "plan",
       messages: [{ role: "user", content: "plan it" }],
     });
-    assert.equal(result.steps[0].title, "step one");
+    assert.equal(result.steps[0].title, "downgraded");
+    const retry = server.requests.at(-1) as {
+      response_format?: { type: string };
+      messages: Array<{ content: string }>;
+    };
+    assert.deepEqual(retry.response_format, { type: "json_object" });
+    // json_object does not carry the shape, so the schema moves into the prompt.
+    assert.ok(retry.messages.at(-1)!.content.includes('"steps"'));
   });
 
   it("repairs after an invalid first reply", async () => {
     server = await startMockLlmServer({
       scenarios: {
         m: [
-          { text: "not json at all" }, // capabilities probe fails -> json_object mode
           { json: { steps: [] } }, // fails min(1)
           { json: { steps: [{ title: "fixed" }] } }, // repair round
         ],

@@ -1,4 +1,10 @@
 import { clampToolOutput, ContextBudget, type BudgetSnapshot } from "./context";
+import {
+  downgradeStructuredMode,
+  isResponseFormatRejection,
+  responseFormatFor,
+  structuredModeFor,
+} from "./provider/capabilities";
 import type {
   ChatMessage,
   ProviderClient,
@@ -92,6 +98,21 @@ const ENVELOPE_INSTRUCTION =
   `Example: {"tool": "read", "args": {"path": "package.json"}}. ` +
   `When finished: {"tool": "done", "args": {"summary": "..."}}`;
 
+/**
+ * The envelope as a JSON schema, so providers that support constrained
+ * decoding make the shape unrepresentable-if-wrong rather than merely
+ * requested. `args` stays free-form: it differs per tool.
+ */
+const ENVELOPE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    tool: { type: "string" },
+    args: { type: "object" },
+  },
+  required: ["tool", "args"],
+  additionalProperties: false,
+};
+
 type ParsedCall = { name: string; args: Record<string, unknown> };
 
 function parseNativeToolCall(call: ToolCall): ParsedCall | null {
@@ -158,6 +179,41 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     budget: snapshot(),
   });
 
+  /**
+   * One provider turn. In envelope mode the reply *is* the tool call, so it
+   * is worth asking for constrained decoding — stepping down the ladder if
+   * this provider refuses the format rather than failing the whole session.
+   */
+  const requestTurn = async () => {
+    for (;;) {
+      const mode = structuredModeFor(opts.client);
+      try {
+        return await opts.client.chat({
+          messages,
+          tools: envelopeMode ? undefined : toolDefs,
+          responseFormat: envelopeMode
+            ? responseFormatFor(mode, {
+                name: "tool_envelope",
+                schema: ENVELOPE_SCHEMA,
+              })
+            : undefined,
+          maxTokens: opts.budget.generationHeadroom(countable(messages)),
+          temperature: opts.temperature ?? 0.2,
+          signal: opts.signal,
+        });
+      } catch (err) {
+        if (
+          !envelopeMode ||
+          opts.signal?.aborted ||
+          !isResponseFormatRejection(err)
+        ) {
+          throw err;
+        }
+        if (downgradeStructuredMode(opts.client, mode) === mode) throw err;
+      }
+    }
+  };
+
   while (turns < opts.maxTurns) {
     if (opts.signal?.aborted) return finish("aborted", lastAssistantText);
     if (opts.budget.shouldHandOff(countable(messages))) {
@@ -171,14 +227,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     let content: string;
     let toolCalls: ToolCall[];
     try {
-      const result = await opts.client.chat({
-        messages,
-        tools: envelopeMode ? undefined : toolDefs,
-        responseFormat: envelopeMode ? { type: "json_object" } : undefined,
-        maxTokens: opts.budget.generationHeadroom(countable(messages)),
-        temperature: opts.temperature ?? 0.2,
-        signal: opts.signal,
-      });
+      const result = await requestTurn();
       content = result.content;
       toolCalls = result.toolCalls;
     } catch (err) {

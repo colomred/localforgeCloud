@@ -32,7 +32,6 @@ test.beforeAll(async () => {
   mock = await startMockLlmServer({
     scenarios: {
       [MODEL]: [
-        { json: { ok: true } }, // capabilities probe
         {
           json: {
             steps: [

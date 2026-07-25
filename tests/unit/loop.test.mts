@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { ContextBudget } from "../../lib/engine/context";
 import { runLoop, type LoopEvent } from "../../lib/engine/loop";
+import { resetCapabilitiesCache } from "../../lib/engine/provider/capabilities";
 import { ProviderClient } from "../../lib/engine/provider/client";
 import { CODING_TOOLS } from "../../lib/engine/tools";
 import { startMockLlmServer } from "../mocks/mock-llm-server.mjs";
@@ -18,6 +19,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  resetCapabilitiesCache();
   fs.rmSync(projectDir, { recursive: true, force: true });
   if (server) {
     await server.close();
@@ -89,7 +91,7 @@ describe("runLoop", () => {
           { toolCall: { name: "write_file", args: "{not json" } },
           { toolCall: { name: "write_file", args: "{still not json" } },
           // After two malformed calls the loop switches to envelope mode
-          // (tools are no longer sent; response_format json_object is).
+          // (tools are no longer sent; the envelope schema is).
           { json: { tool: "write_file", args: { path: "c.txt", content: "y" } } },
           { json: { tool: "done", args: { summary: "recovered" } } },
         ],
@@ -99,8 +101,32 @@ describe("runLoop", () => {
     assert.equal(result.outcome, "done");
     assert.equal(result.summary, "recovered");
     assert.ok(fs.existsSync(path.join(projectDir, "c.txt")));
-    const envelopeRequest = server.requests.at(-1) as Record<string, unknown>;
+    const envelopeRequest = server.requests.at(-1) as {
+      tools?: unknown;
+      response_format?: { type: string; json_schema?: { name: string } };
+    };
     assert.equal(envelopeRequest.tools, undefined);
+    assert.equal(envelopeRequest.response_format?.type, "json_schema");
+    assert.equal(envelopeRequest.response_format?.json_schema?.name, "tool_envelope");
+  });
+
+  it("falls back to json_object in envelope mode when json_schema is refused", async () => {
+    server = await startMockLlmServer({
+      scenarios: {
+        m: [
+          { toolCall: { name: "write_file", args: "{not json" } },
+          { toolCall: { name: "write_file", args: "{still not json" } },
+          // Envelope mode asks for json_schema; this provider only knows
+          // json_object, so the turn is retried rather than lost.
+          { status: 400, error: "'response_format.type' must be 'json_object'" },
+          { json: { tool: "done", args: { summary: "recovered" } } },
+        ],
+      },
+    });
+    const result = await runLoop(loopOptions("m"));
+    assert.equal(result.outcome, "done");
+    assert.equal(result.summary, "recovered");
+    const envelopeRequest = server.requests.at(-1) as Record<string, unknown>;
     assert.deepEqual(envelopeRequest.response_format, { type: "json_object" });
   });
 

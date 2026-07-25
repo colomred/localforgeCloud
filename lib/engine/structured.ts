@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { probeCapabilities } from "./provider/capabilities";
+import {
+  downgradeStructuredMode,
+  isResponseFormatRejection,
+  responseFormatFor,
+  structuredModeFor,
+} from "./provider/capabilities";
 import type { ChatMessage, ProviderClient } from "./provider/client";
 
 /**
@@ -8,10 +13,12 @@ import type { ChatMessage, ProviderClient } from "./provider/client";
  * model, whatever that takes.
  *
  * Strategy ladder:
- *   1. `response_format: json_schema` when the provider honors it
- *      (constrained decoding — malformed output becomes impossible).
- *   2. Otherwise plain prompting with "reply with JSON only", then extract
- *      the first JSON object from the reply and zod-validate it.
+ *   1. `response_format: json_schema` — constrained decoding, which makes
+ *      malformed output impossible. Every provider we target is asked for
+ *      this first.
+ *   2. `response_format: json_object` for providers that reject json_schema,
+ *      and plain prompting for providers that reject both. Neither carries
+ *      the shape, so the schema goes into the prompt instead.
  *   3. One repair round-trip: feed the validation error back and ask for a
  *      corrected object.
  */
@@ -103,23 +110,46 @@ export async function generateStructured<T>(
     (definitions?.[opts.name] as Record<string, unknown> | undefined) ??
     (jsonSchema as Record<string, unknown>);
 
-  const capabilities = await probeCapabilities(opts.client);
   const maxTokens = opts.maxTokens ?? 4096;
   const temperature = opts.temperature ?? 0.2;
 
+  // Constrained decoding carries the shape on its own. Without it the model
+  // has to be told which keys to produce, or "reply with JSON only" yields
+  // well-formed JSON of entirely the wrong shape.
+  const withSchemaInPrompt = (messages: ChatMessage[]): ChatMessage[] => [
+    ...messages,
+    {
+      role: "user",
+      content:
+        `Reply with ONLY a JSON object matching this schema ` +
+        `(no prose, no markdown):\n${JSON.stringify(schemaObject)}`,
+    },
+  ];
+
+  /** Request one completion, stepping down the ladder if the format is refused. */
+  const chat = async (messages: ChatMessage[]) => {
+    for (;;) {
+      const mode = structuredModeFor(opts.client);
+      try {
+        return await opts.client.chat({
+          messages: mode === "json_schema" ? messages : withSchemaInPrompt(messages),
+          responseFormat: responseFormatFor(mode, {
+            name: opts.name,
+            schema: schemaObject,
+          }),
+          maxTokens,
+          temperature,
+          signal: opts.signal,
+        });
+      } catch (err) {
+        if (opts.signal?.aborted || !isResponseFormatRejection(err)) throw err;
+        if (downgradeStructuredMode(opts.client, mode) === mode) throw err;
+      }
+    }
+  };
+
   const attempt = async (messages: ChatMessage[]): Promise<T> => {
-    const result = await opts.client.chat({
-      messages,
-      responseFormat: capabilities.jsonSchema
-        ? {
-            type: "json_schema",
-            json_schema: { name: opts.name, strict: true, schema: schemaObject },
-          }
-        : { type: "json_object" },
-      maxTokens,
-      temperature,
-      signal: opts.signal,
-    });
+    const result = await chat(messages);
     const raw = extractFirstJson(result.content);
     const parsed = opts.schema.safeParse(raw);
     if (!parsed.success) {

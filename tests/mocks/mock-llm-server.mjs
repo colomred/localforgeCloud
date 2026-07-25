@@ -13,6 +13,14 @@
  *   { toolCall: { name, args } }                 — native tool_calls reply
  *   { json: {...} }                              — JSON body as text (for
  *                                                  structured/envelope mode)
+ *   { reasoning: {...} | "..." }                 — reply delivered on the
+ *                                                  reasoning channel with an
+ *                                                  empty content, as reasoning
+ *                                                  models do under constrained
+ *                                                  decoding
+ *   { status, error }                            — HTTP error instead of a
+ *                                                  completion (e.g. a provider
+ *                                                  refusing a response_format)
  *   { fn: (body) => response }                   — computed per request
  *
  * Used programmatically by unit tests (startMockLlmServer) and standalone
@@ -23,8 +31,7 @@ import http from "node:http";
 
 let callIdCounter = 0;
 
-function toOpenAiResponse(scripted, body) {
-  const resolved = typeof scripted === "function" ? scripted(body) : scripted;
+function toOpenAiResponse(resolved, body) {
   const message = { role: "assistant", content: null };
   if (resolved.toolCall) {
     message.tool_calls = [
@@ -45,6 +52,12 @@ function toOpenAiResponse(scripted, body) {
       typeof resolved.json === "string"
         ? resolved.json
         : JSON.stringify(resolved.json);
+  } else if (resolved.reasoning !== undefined) {
+    message.content = "";
+    message.reasoning_content =
+      typeof resolved.reasoning === "string"
+        ? resolved.reasoning
+        : JSON.stringify(resolved.reasoning);
   } else {
     message.content = resolved.text ?? "";
   }
@@ -107,7 +120,12 @@ export function startMockLlmServer(options = {}) {
         const cursor = cursors.get(body.model) ?? 0;
         const scripted = scenario[Math.min(cursor, scenario.length - 1)];
         cursors.set(body.model, cursor + 1);
-        return send(200, toOpenAiResponse(scripted, body));
+        const resolved =
+          typeof scripted === "function" ? scripted(body) : scripted;
+        if (resolved.status && resolved.status >= 400) {
+          return send(resolved.status, { error: resolved.error ?? "error" });
+        }
+        return send(200, toOpenAiResponse(resolved, body));
       }
       send(404, { error: `unhandled ${req.method} ${req.url}` });
     });

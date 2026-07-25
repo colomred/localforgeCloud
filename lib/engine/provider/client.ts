@@ -50,6 +50,8 @@ export type ChatRequest = {
 
 export type ChatResult = {
   content: string;
+  /** The provider's chain-of-thought channel, when it exposes one. */
+  reasoning: string;
   toolCalls: ToolCall[];
   finishReason: string | null;
   usage: { promptTokens: number; completionTokens: number } | null;
@@ -190,7 +192,12 @@ export class ProviderClient {
 
       const data = (await res.json()) as {
         choices?: Array<{
-          message?: { content?: string | null; tool_calls?: ToolCall[] };
+          message?: {
+            content?: string | null;
+            reasoning_content?: string | null;
+            reasoning?: string | null;
+            tool_calls?: ToolCall[];
+          };
           finish_reason?: string;
         }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -203,12 +210,32 @@ export class ProviderClient {
           true,
         );
       }
+      const toolCalls = Array.isArray(choice.message.tool_calls)
+        ? choice.message.tool_calls
+        : [];
+      const finishReason = choice.finish_reason ?? null;
+      const content = choice.message.content ?? "";
+      const reasoning =
+        choice.message.reasoning_content ?? choice.message.reasoning ?? "";
+
+      // Reasoning models normally split their reply: the answer on `content`,
+      // the monologue on `reasoning_content`. Under constrained decoding
+      // (response_format json_schema) the grammar applies from the very first
+      // token — which for these chat templates is already inside the think
+      // block — so the entire, perfectly valid answer arrives on the reasoning
+      // channel and `content` comes back empty. Recover it, but only when the
+      // model actually stopped: a reply cut off by the token cap leaves half a
+      // monologue there, and half a monologue is not an answer.
+      const recovered =
+        content.trim() === "" && toolCalls.length === 0 && finishReason === "stop"
+          ? reasoning
+          : content;
+
       return {
-        content: choice.message.content ?? "",
-        toolCalls: Array.isArray(choice.message.tool_calls)
-          ? choice.message.tool_calls
-          : [],
-        finishReason: choice.finish_reason ?? null,
+        content: recovered,
+        reasoning,
+        toolCalls,
+        finishReason,
         usage: data.usage
           ? {
               promptTokens: data.usage.prompt_tokens ?? 0,

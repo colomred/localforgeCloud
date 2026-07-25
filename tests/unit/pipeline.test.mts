@@ -63,7 +63,6 @@ describe("runPipeline", () => {
     server = await startMockLlmServer({
       scenarios: {
         m: [
-          { json: { ok: true } }, // capabilities probe
           {
             json: {
               steps: [
@@ -105,7 +104,6 @@ describe("runPipeline", () => {
     server = await startMockLlmServer({
       scenarios: {
         m: [
-          { json: { ok: true } }, // capabilities probe
           { json: { steps: [{ title: "Broken step", detail: "x", files: [], verify: "none" }] } },
           // step session: three malformed replies in a row
           { toolCall: { name: "write_file", args: "{bad json" } },
@@ -127,8 +125,8 @@ describe("runPipeline", () => {
   });
 
   it("resumes at the first non-passed step with an existing plan", async () => {
-    // Resume never calls generateStructured, so there is no capabilities
-    // probe: the first request is already the step-2 session.
+    // Resume never calls generateStructured: the first request is already
+    // the step-2 session.
     server = await startMockLlmServer({
       scenarios: {
         m: [
