@@ -6,8 +6,16 @@
 
 ### 1. Prerequisites
 
-- **Node.js 20+** — [download here](https://nodejs.org/)
+- **Node.js 20+** — [download here](https://nodejs.org/). The current LTS is the
+  safest choice; LocalForge uses a native SQLite module that needs a prebuilt
+  binary for your Node.js version.
 - **LM Studio** — [download here](https://lmstudio.ai/)
+
+> **npm is the supported package manager.** `package-lock.json` is the source of
+> truth. Other package managers work, but you are on your own for lockfile drift
+> — and note that pnpm 10+ blocks native build scripts by default, so
+> `better-sqlite3` needs the `pnpm.onlyBuiltDependencies` entry already declared
+> in `package.json`.
 
 ### 2. Set up LM Studio
 
@@ -134,6 +142,29 @@ settings. The keys that matter most for small models:
 
 Each project keeps its agent memory in `.localforge/` (`brief.md` and
 per-feature notes) — plain markdown you can read and edit.
+
+## Troubleshooting
+
+### "Could not locate the bindings file" / native SQLite errors
+
+LocalForge stores data in SQLite via `better-sqlite3`, a native module whose
+compiled binary is tied to the Node.js version it was installed for. If you see
+a bindings error, `node_modules` was almost certainly installed under a
+different Node.js version — or the install step that downloads the prebuilt
+binary was skipped.
+
+```bash
+npm rebuild better-sqlite3
+# if that doesn't help, reinstall from scratch:
+rm -rf node_modules && npm install
+```
+
+Switching Node.js versions (via nvm, fnm, Volta, or a new installer) requires a
+reinstall. If you are on a brand-new Node.js release, `better-sqlite3` may not
+publish a prebuilt binary for it yet — use the current LTS instead.
+
+`start.sh` / `start.bat` probe for this on every launch and repair it
+automatically.
 
 ## License
 

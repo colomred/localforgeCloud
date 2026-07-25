@@ -23,7 +23,53 @@ const DB_PATH = process.env.LOCALFORGE_DB_PATH || DEFAULT_DB_PATH;
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-const sqlite = new Database(DB_PATH);
+/**
+ * Open the SQLite file, turning a native-module load failure into an
+ * actionable message.
+ *
+ * better-sqlite3 resolves its compiled addon lazily, on the first
+ * `new Database()`, so a missing or mismatched binary surfaces here as a bare
+ * "Could not locate the bindings file" stack trace. That happens when
+ * node_modules was installed under a different Node.js version, when the
+ * package manager skipped the install script, or when the running Node.js is
+ * newer than any prebuilt binary the installed better-sqlite3 publishes. All
+ * three are recoverable, so say how instead of dumping the raw error.
+ */
+function openDatabase(dbPath: string) {
+  try {
+    return new Database(dbPath);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const isBindingsFailure =
+      /bindings file|better_sqlite3\.node|different Node\.js version|NODE_MODULE_VERSION/i.test(
+        message,
+      );
+    if (!isBindingsFailure) throw err;
+
+    throw new Error(
+      [
+        "LocalForge could not load its native SQLite module (better-sqlite3).",
+        "",
+        `Running Node.js ${process.version} (ABI ${process.versions.modules}) on ${process.platform}-${process.arch}.`,
+        "",
+        "Most likely node_modules was installed under a different Node.js version,",
+        "or the install step that fetches the prebuilt binary never ran.",
+        "",
+        "Try, in order:",
+        "  npm install",
+        "  npm rebuild better-sqlite3",
+        "",
+        "If you are on a very new Node.js release, better-sqlite3 may not publish a",
+        "prebuilt binary for it yet — switch to the current Node.js LTS and reinstall.",
+        "",
+        `Original error: ${message}`,
+      ].join("\n"),
+      { cause: err },
+    );
+  }
+}
+
+const sqlite = openDatabase(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 

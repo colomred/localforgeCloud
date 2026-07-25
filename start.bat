@@ -49,6 +49,29 @@ if not exist "node_modules\" (
   )
 )
 
+rem The SQLite driver is a native module, so its binary is tied to the Node.js
+rem version it was installed for. better-sqlite3 loads that binary lazily on the
+rem first connection, so probe it here and repair it now rather than failing at
+rem page load with "Could not locate the bindings file".
+node -e "new (require('better-sqlite3'))(':memory:').close()" >nul 2>nul
+if errorlevel 1 (
+  echo Native SQLite module is missing or built for a different Node.js version.
+  echo Rebuilding for %NODE_VERSION%...
+  call npm rebuild better-sqlite3
+  node -e "new (require('better-sqlite3'))(':memory:').close()" >nul 2>nul
+  if errorlevel 1 (
+    call npm install
+    node -e "new (require('better-sqlite3'))(':memory:').close()" >nul 2>nul
+    if errorlevel 1 (
+      echo Could not build the native SQLite module for %NODE_VERSION%.
+      echo better-sqlite3 may not ship a prebuilt binary for this Node.js release yet.
+      echo Switch to the current Node.js LTS and run this file again.
+      pause
+      exit /b 1
+    )
+  )
+)
+
 echo Applying database migrations...
 call npm run db:migrate
 if errorlevel 1 (
